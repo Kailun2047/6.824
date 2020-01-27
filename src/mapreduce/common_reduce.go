@@ -1,5 +1,12 @@
 package mapreduce
 
+import (
+	"encoding/json"
+	"log"
+	"os"
+	"sort"
+)
+
 func doReduce(
 	jobName string, // the name of the whole MapReduce job
 	reduceTask int, // which reduce task this is
@@ -31,7 +38,7 @@ func doReduce(
 	//
 	// You should write the reduce output as JSON encoded KeyValue
 	// objects to the file named outFile. We require you to use JSON
-	// because that is what the merger than combines the output
+	// because that is what the merger that combines the output
 	// from all the reduce tasks expects. There is nothing special about
 	// JSON -- it is just the marshalling format we chose to use. Your
 	// output code will look something like this:
@@ -44,4 +51,41 @@ func doReduce(
 	//
 	// Your code here (Part I).
 	//
+	keys := make([]string, 0)
+	kvs := make(map[string][]string)
+	for mapTask := 0; mapTask < nMap; mapTask++ {
+		intermFile := reduceName(jobName, mapTask, reduceTask)
+		fInterm, err := os.OpenFile(intermFile, os.O_RDONLY, 0755)
+		if err != nil {
+			log.Printf("Cannot open file %s", intermFile)
+			continue
+		}
+		dec := json.NewDecoder(fInterm)
+		for {
+			var kv KeyValue
+			err = dec.Decode(&kv)
+			if err != nil {
+				break
+			}
+			k, v := kv.Key, kv.Value
+			if _, ok := kvs[k]; !ok {
+				keys = append(keys, k)
+				kvs[k] = make([]string, 0)
+			}
+			kvs[k] = append(kvs[k], v)
+		}
+		fInterm.Close()
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return keys[i] < keys[j]
+	})
+	fOut, err := os.OpenFile(outFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0755)
+	if err != nil {
+		log.Println("Failed to open output file")
+	}
+	defer fOut.Close()
+	enc := json.NewEncoder(fOut)
+	for _, key := range keys {
+		enc.Encode(KeyValue{key, reduceF(key, kvs[key])})
+	}
 }
