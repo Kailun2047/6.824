@@ -2,7 +2,6 @@ package mapreduce
 
 import (
 	"fmt"
-	"log"
 	"sync"
 )
 
@@ -34,36 +33,49 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	//
 	// Your code here (Part III, Part IV).
 	//
-	var wg sync.WaitGroup
-	i := 0
-	wg.Add(ntasks)
-	for i < ntasks {
+	completed := 0
+	var mu sync.Mutex
+	taskChan := make(chan DoTaskArgs, ntasks)
+
+	for i := 0; i < ntasks; i++ {
+		file := ""
+		if phase == mapPhase {
+			file = mapFiles[i]
+		}
+		args := DoTaskArgs{
+			JobName:       jobName,
+			File:          file,
+			Phase:         phase,
+			TaskNumber:    i,
+			NumOtherPhase: n_other,
+		}
+		taskChan <- args
+	}
+
+	for {
+		mu.Lock()
+		if completed == ntasks {
+			mu.Unlock()
+			break
+		}
+		mu.Unlock()
 		select {
-		case worker := <-registerChan:
-			file := ""
-			if phase == mapPhase {
-				file = mapFiles[i]
-			}
-			args := DoTaskArgs{
-				JobName:       jobName,
-				File:          file,
-				Phase:         phase,
-				TaskNumber:    i,
-				NumOtherPhase: n_other,
-			}
-			i++
-			go func(worker_addr string) {
-				ok := call(worker_addr, "Worker.DoTask", args, new(struct{}))
+		case task_args := <-taskChan:
+			worker := <-registerChan
+			go func() {
+				ok := call(worker, "Worker.DoTask", task_args, new(struct{}))
 				if !ok {
-					log.Printf("Failed to call DoTask() on worker %s\n", worker_addr)
+					taskChan <- task_args
+					return
 				}
-				wg.Done()
-				registerChan <- worker_addr
-			}(worker)
+				mu.Lock()
+				completed++
+				mu.Unlock()
+				registerChan <- worker
+			}()
 		default:
 		}
 	}
-	wg.Wait()
 
 	fmt.Printf("Schedule: %v done\n", phase)
 }
