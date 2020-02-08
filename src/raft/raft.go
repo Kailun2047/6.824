@@ -22,8 +22,8 @@ import (
 	"labgob"
 	"labrpc"
 	"log"
-	"sync"
 	"math/rand"
+	"sync"
 	"time"
 )
 
@@ -85,7 +85,7 @@ type Raft struct {
 	// Count of votes for candidate.
 	votes int
 	// For election timeout.
-	timeoutValue int
+	timeoutValue  int
 	timeoutRemain int
 }
 
@@ -143,9 +143,9 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Term int
-	CandidateId int
-	LastLogTerm int
+	Term         int
+	CandidateId  int
+	LastLogTerm  int
 	LastLogIndex int
 }
 
@@ -155,7 +155,7 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	Term int
+	Term    int
 	Granted bool
 }
 
@@ -180,8 +180,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.heartBeat()
 		return
 	}
-	if (rf.votedFor == -1 || rf.votedFor == rf.me) && 
-	(args.LastLogTerm > rf.term || args.LastLogTerm == rf.term && args.LastLogIndex >= len(rf.logs)) {
+	if (rf.votedFor == -1 || rf.votedFor == rf.me) &&
+		(args.LastLogTerm > rf.term || args.LastLogTerm == rf.term && args.LastLogIndex >= len(rf.logs)) {
 		rf.votedFor = args.CandidateId
 		rf.timeoutRemain = rf.timeoutValue
 		reply.Granted = true
@@ -197,15 +197,14 @@ func (rf *Raft) heartBeat() {
 		prevLogIndex = len(rf.logs) - 1
 		prevLogTerm = rf.logs[prevLogIndex].term
 	}
-	if len()
 	for peerId := range rf.peers {
-		if peerId != me {
-			rf.sendAppendEntries(&AppendEntriesArgs{
-				Term: rf.term,
-				LeaderId: me,
-				PrevLogTerm: prevLogTerm,
+		if peerId != rf.me {
+			rf.sendAppendEntries(peerId, &AppendEntriesArgs{
+				Term:         rf.term,
+				LeaderId:     rf.me,
+				PrevLogTerm:  prevLogTerm,
 				PrevLogIndex: prevLogIndex,
-				Entries: make([]LogEntry, 0),
+				Entries:      make([]LogEntry, 0),
 				LeaderCommit: rf.committedIndex,
 			}, &AppendEntriesReply{})
 		}
@@ -248,16 +247,16 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 type AppendEntriesArgs struct {
-	Term int
-	LeaderId int
-	PrevLogTerm int
+	Term         int
+	LeaderId     int
+	PrevLogTerm  int
 	PrevLogIndex int
-	Entries []LogEntry
+	Entries      []LogEntry
 	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
-	Term int
+	Term    int
 	Success bool
 }
 
@@ -293,7 +292,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	// Update commitIndex if necessary.
 	if args.LeaderCommit > rf.committedIndex {
-		rf.committedIndex = min(args.LeaderCommit, len(rf.logs) - 1)
+		rf.committedIndex = min(args.LeaderCommit, len(rf.logs)-1)
 	}
 	defer rf.mu.Unlock()
 }
@@ -397,7 +396,7 @@ func checkElectionTimeout(rf *Raft) {
 			continue
 		}
 		if rf.role == Candidate && rf.votes > len(rf.peers)/2 {
-			rf.role == Leader
+			rf.role = Leader
 			rf.mu.Unlock()
 			continue
 		}
@@ -408,20 +407,20 @@ func checkElectionTimeout(rf *Raft) {
 			rf.role = Candidate
 			rf.term += 1
 			rf.votedFor = rf.me
-			for peerId := range rf.peer {
-				if peerId != me {
+			for peerId := range rf.peers {
+				if peerId != rf.me {
 					lastLogTerm := 0
 					if len(rf.logs) > 0 {
-						lastLogTerm = rf.logs[len(rf.logs) - 1].term
+						lastLogTerm = rf.logs[len(rf.logs)-1].term
 					}
 					go func() {
 						success := rf.sendRequestVote(
 							peerId,
 							&RequestVoteArgs{
-								Term: rf.term,
-								CandidateId: rf.me,
+								Term:         rf.term,
+								CandidateId:  rf.me,
 								LastLogIndex: len(rf.logs),
-								LastLogTerm: lastLogTerm,
+								LastLogTerm:  lastLogTerm,
 							},
 							&RequestVoteReply{},
 						)
