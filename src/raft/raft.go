@@ -59,6 +59,10 @@ const (
 	Leader
 )
 
+// Election timeout and heartbeat timeout constants.
+const MinElectionTimeout int = 300
+const HeartbeatTimeout int = MinElectionTimeout / 2
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -168,17 +172,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.term
-	if args.Term < rf.term {
+	if args.Term < rf.term || rf.role == Leader {
 		reply.Granted = false
 		return
 	}
 	if args.Term > rf.term {
 		rf.role = Follower
-	}
-	// Leader should heartbeat upon election.
-	if rf.role == Leader {
-		rf.heartBeat()
-		return
 	}
 	if (rf.votedFor == -1 || rf.votedFor == rf.me) &&
 		(args.LastLogTerm > rf.term || args.LastLogTerm == rf.term && args.LastLogIndex >= len(rf.logs)) {
@@ -187,27 +186,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Granted = true
 	} else {
 		reply.Granted = false
-	}
-}
-
-func (rf *Raft) heartBeat() {
-	prevLogIndex := -1
-	prevLogTerm := 0
-	if len(rf.logs) > 0 {
-		prevLogIndex = len(rf.logs) - 1
-		prevLogTerm = rf.logs[prevLogIndex].term
-	}
-	for peerId := range rf.peers {
-		if peerId != rf.me {
-			rf.sendAppendEntries(peerId, &AppendEntriesArgs{
-				Term:         rf.term,
-				LeaderId:     rf.me,
-				PrevLogTerm:  prevLogTerm,
-				PrevLogIndex: prevLogIndex,
-				Entries:      make([]LogEntry, 0),
-				LeaderCommit: rf.committedIndex,
-			}, &AppendEntriesReply{})
-		}
 	}
 }
 
@@ -372,12 +350,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.term = 0
 	rf.votedFor = -1
 	rf.role = Follower
+	rf.votes = 0
 	r := rand.New(rand.NewSource(1))
-	rf.timeoutValue = 250 + r.Intn(151)
+	rf.timeoutValue = MinElectionTimeout + r.Intn(MinElectionTimeout/2)
 	rf.timeoutRemain = rf.timeoutValue
 	go checkElectionTimeout(rf)
-
-	// TODO: if role is leader, send enpty AppendEntries periodically.
 
 	// TODO: apply commited logs and update lastApplied.
 
@@ -391,12 +368,17 @@ func checkElectionTimeout(rf *Raft) {
 	for {
 		time.Sleep(10)
 		rf.mu.Lock()
+		// If server's role is Leader, send out AppendEntries periodically.
 		if rf.role == Leader {
+			rf.heartbeat()
 			rf.mu.Unlock()
 			continue
 		}
+		// Convert to (or remain) Candidate when follower's (or Candidate's)
+		// election timeout is reached, and trigger new election.
 		if rf.role == Candidate && rf.votes > len(rf.peers)/2 {
 			rf.role = Leader
+			rf.heartbeat()
 			rf.mu.Unlock()
 			continue
 		}
@@ -405,6 +387,7 @@ func checkElectionTimeout(rf *Raft) {
 		if rf.timeoutRemain < 0 {
 			rf.timeoutRemain = rf.timeoutValue
 			rf.role = Candidate
+			rf.votes = 0
 			rf.term += 1
 			rf.votedFor = rf.me
 			for peerId := range rf.peers {
@@ -424,7 +407,6 @@ func checkElectionTimeout(rf *Raft) {
 							},
 							&RequestVoteReply{},
 						)
-						// TODO: check if lock can be obtained here.
 						if success {
 							rf.mu.Lock()
 							rf.votes += 1
@@ -435,5 +417,29 @@ func checkElectionTimeout(rf *Raft) {
 			}
 		}
 		rf.mu.Unlock()
+	}
+}
+
+// heartbeat() function should be used when lock is obtained.
+func (rf *Raft) heartbeat() {
+	prevLogIndex := -1
+	prevLogTerm := 0
+	if len(rf.logs) > 0 {
+		prevLogIndex = len(rf.logs) - 1
+		prevLogTerm = rf.logs[prevLogIndex].term
+	}
+	for peerId := range rf.peers {
+		if peerId != rf.me {
+			go func() {
+				rf.sendAppendEntries(peerId, &AppendEntriesArgs{
+					Term:         rf.term,
+					LeaderId:     rf.me,
+					PrevLogTerm:  prevLogTerm,
+					PrevLogIndex: prevLogIndex,
+					Entries:      make([]LogEntry, 0),
+					LeaderCommit: rf.committedIndex,
+				}, &AppendEntriesReply{})
+			}()
+		}
 	}
 }
