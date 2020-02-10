@@ -46,8 +46,8 @@ type ApplyMsg struct {
 
 // Log entry type.
 type LogEntry struct {
-	term int
-	data []byte
+	Term int
+	Data []byte
 }
 
 // Server roles.
@@ -91,6 +91,8 @@ type Raft struct {
 	// For election timeout.
 	timeoutValue  int
 	timeoutRemain int
+	// For debugging.
+	alive bool
 }
 
 // return currentTerm and whether this server
@@ -168,7 +170,7 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	log.Printf("Server %d receives RequestVote RPC from candidate %d\n", rf.me, args.CandidateId)
+	rf.debug("Server %d receives RequestVote RPC from candidate %d\n", rf.me, args.CandidateId)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.term
@@ -183,6 +185,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		(args.LastLogTerm > rf.term || args.LastLogTerm == rf.term && args.LastLogIndex >= len(rf.logs)) {
 		rf.votedFor = args.CandidateId
 		rf.timeoutRemain = rf.timeoutValue
+		rf.debug("Server %d grants vote to candidate %d\n", rf.me, args.CandidateId)
 		reply.Granted = true
 	} else {
 		reply.Granted = false
@@ -219,14 +222,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	log.Printf("Candidate %d sends RequestVote RPC to server %d\n", rf.me, server)
+	rf.debug("Candidate %d sends RequestVote RPC to server %d\n", rf.me, server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
 
 type AppendEntriesArgs struct {
 	Term         int
-	LeaderId     int
+	LeaderID     int
 	PrevLogTerm  int
 	PrevLogIndex int
 	Entries      []LogEntry
@@ -250,14 +253,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	// If term of log at PrevLogIndex doesn't match leader's, return false
 	// so that leader will decrement PrevLogIndex.
-	if len(rf.logs) <= args.PrevLogIndex || rf.logs[args.PrevLogIndex].term != args.PrevLogTerm {
+	if len(rf.logs) <= args.PrevLogIndex || args.PrevLogIndex == -1 || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
 		return
 	}
 	// Remove conflicting entries (same index, different term) and append new ones from leader.
 	conflictIndex := len(rf.logs)
 	for i := args.PrevLogIndex; i < len(rf.logs); i++ {
-		if rf.logs[i].term != args.Entries[i].term {
+		if rf.logs[i].Term != args.Entries[i].Term {
 			conflictIndex = i
 			break
 		}
@@ -276,14 +279,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	log.Printf("Leader %d sends AppendEntries RPC to server %d\n", rf.me, server)
+	rf.debug("Leader %d sends AppendEntries RPC to server %d\n", rf.me, server)
 	success := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	// Convert to follower if peer's term is newer.
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if rf.term < reply.Term {
-		rf.role = Follower
-	}
 	return success
 }
 
@@ -326,6 +323,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	rf.alive = false
 }
 
 //
@@ -351,10 +349,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.role = Follower
 	rf.votes = 0
+	rf.alive = true
 	r := rand.New(rand.NewSource(1))
 	rf.timeoutValue = MinElectionTimeout + r.Intn(MinElectionTimeout/2)
 	rf.timeoutRemain = rf.timeoutValue
 	go checkElectionTimeout(rf)
+	go checkHeartbeat(rf)
 
 	// TODO: apply commited logs and update lastApplied.
 
@@ -366,18 +366,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 func checkElectionTimeout(rf *Raft) {
 	for {
-		time.Sleep(10)
+		time.Sleep(10 * time.Millisecond)
 		rf.mu.Lock()
-		// If server's role is Leader, send out AppendEntries periodically.
-		if rf.role == Leader {
-			rf.heartbeat()
-			rf.mu.Unlock()
-			continue
-		}
 		// Convert to (or remain) Candidate when follower's (or Candidate's)
 		// election timeout is reached, and trigger new election.
 		if rf.role == Candidate && rf.votes > len(rf.peers)/2 {
 			rf.role = Leader
+			rf.debug("Server %d elected as new leader\n", rf.me)
 			rf.heartbeat()
 			rf.mu.Unlock()
 			continue
@@ -388,33 +383,46 @@ func checkElectionTimeout(rf *Raft) {
 			rf.timeoutRemain = rf.timeoutValue
 			rf.role = Candidate
 			rf.votes = 0
-			rf.term += 1
+			rf.term++
 			rf.votedFor = rf.me
-			for peerId := range rf.peers {
-				if peerId != rf.me {
+			for peerID := range rf.peers {
+				if peerID != rf.me {
 					lastLogTerm := 0
 					if len(rf.logs) > 0 {
-						lastLogTerm = rf.logs[len(rf.logs)-1].term
+						lastLogTerm = rf.logs[len(rf.logs)-1].Term
 					}
+					var reply RequestVoteReply
 					go func() {
-						success := rf.sendRequestVote(
-							peerId,
+						ok := rf.sendRequestVote(
+							peerID,
 							&RequestVoteArgs{
 								Term:         rf.term,
 								CandidateId:  rf.me,
 								LastLogIndex: len(rf.logs),
 								LastLogTerm:  lastLogTerm,
 							},
-							&RequestVoteReply{},
+							&reply,
 						)
-						if success {
+						if ok && reply.Granted {
 							rf.mu.Lock()
-							rf.votes += 1
+							rf.votes++
 							rf.mu.Unlock()
 						}
 					}()
 				}
 			}
+		}
+		rf.mu.Unlock()
+	}
+}
+
+func checkHeartbeat(rf *Raft) {
+	for {
+		time.Sleep((time.Duration)(HeartbeatTimeout) * time.Millisecond)
+		rf.mu.Lock()
+		// If server's role is Leader, send out AppendEntries periodically.
+		if rf.role == Leader {
+			rf.heartbeat()
 		}
 		rf.mu.Unlock()
 	}
@@ -426,20 +434,31 @@ func (rf *Raft) heartbeat() {
 	prevLogTerm := 0
 	if len(rf.logs) > 0 {
 		prevLogIndex = len(rf.logs) - 1
-		prevLogTerm = rf.logs[prevLogIndex].term
+		prevLogTerm = rf.logs[prevLogIndex].Term
 	}
-	for peerId := range rf.peers {
-		if peerId != rf.me {
+	for peerID := range rf.peers {
+		if peerID != rf.me {
 			go func() {
-				rf.sendAppendEntries(peerId, &AppendEntriesArgs{
+				var reply AppendEntriesReply
+				ok := rf.sendAppendEntries(peerID, &AppendEntriesArgs{
 					Term:         rf.term,
-					LeaderId:     rf.me,
+					LeaderID:     rf.me,
 					PrevLogTerm:  prevLogTerm,
 					PrevLogIndex: prevLogIndex,
 					Entries:      make([]LogEntry, 0),
 					LeaderCommit: rf.committedIndex,
-				}, &AppendEntriesReply{})
+				}, &reply)
+				// Convert to follower if peer's term is newer.
+				if ok && rf.term < reply.Term {
+					rf.role = Follower
+				}
 			}()
 		}
+	}
+}
+
+func (rf *Raft) debug(s string, a ...interface{}) {
+	if rf.alive {
+		log.Printf(s, a...)
 	}
 }
