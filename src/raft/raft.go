@@ -61,7 +61,7 @@ const (
 
 // Election timeout and heartbeat timeout constants.
 const MinElectionTimeout int = 300
-const HeartbeatTimeout int = MinElectionTimeout / 2
+const HeartbeatTimeout int = MinElectionTimeout / 5
 
 //
 // A Go object implementing a single Raft peer.
@@ -174,15 +174,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.term
-	if args.Term < rf.term || rf.role == Leader {
+	if args.Term < rf.term {
+		log.Printf("Candidate term is obsolete. (candidate %d: %d; follower %d: %d)\n", args.CandidateId, args.Term, rf.me, rf.term)
 		reply.Granted = false
 		return
 	}
 	if args.Term > rf.term {
-		rf.role = Follower
+		rf.convertToFollower(args.Term)
 	}
-	if (rf.votedFor == -1 || rf.votedFor == rf.me) &&
-		(args.LastLogTerm > rf.term || args.LastLogTerm == rf.term && args.LastLogIndex >= len(rf.logs)) {
+	lastLog := LogEntry{
+		Term: -1,
+		Data: nil,
+	}
+	if len(rf.logs) > 0 {
+		lastLog = rf.logs[len(rf.logs)-1]
+	}
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
+		(lastLog.Term == -1 || args.LastLogTerm > lastLog.Term || args.LastLogTerm == lastLog.Term && args.LastLogIndex >= len(rf.logs)-1) {
 		rf.votedFor = args.CandidateId
 		rf.timeoutRemain = rf.timeoutValue
 		rf.debug("Server %d grants vote to candidate %d\n", rf.me, args.CandidateId)
@@ -242,14 +250,16 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	log.Printf("Follower %d (term: %d) receives AppendEntries RPC from leader %d (term: %d)\n", rf.me, rf.term, args.LeaderID, args.Term)
 	rf.mu.Lock()
 	reply.Term = rf.term
+	// If leader's term is stale, return false.
 	if args.Term < rf.term {
 		reply.Success = false
 		return
 	}
 	if args.Term > rf.term {
-		rf.role = Follower
+		rf.convertToFollower(args.Term)
 	}
 	// If term of log at PrevLogIndex doesn't match leader's, return false
 	// so that leader will decrement PrevLogIndex.
@@ -257,6 +267,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
+	rf.timeoutRemain = rf.timeoutValue
 	// Remove conflicting entries (same index, different term) and append new ones from leader.
 	conflictIndex := len(rf.logs)
 	for i := args.PrevLogIndex; i < len(rf.logs); i++ {
@@ -350,8 +361,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = Follower
 	rf.votes = 0
 	rf.alive = true
-	r := rand.New(rand.NewSource(1))
-	rf.timeoutValue = MinElectionTimeout + r.Intn(MinElectionTimeout/2)
+	rf.timeoutValue = MinElectionTimeout + rand.Intn(MinElectionTimeout/2)
 	rf.timeoutRemain = rf.timeoutValue
 	go checkElectionTimeout(rf)
 	go checkHeartbeat(rf)
@@ -372,18 +382,24 @@ func checkElectionTimeout(rf *Raft) {
 		// election timeout is reached, and trigger new election.
 		if rf.role == Candidate && rf.votes > len(rf.peers)/2 {
 			rf.role = Leader
+			rf.votedFor = -1
 			rf.debug("Server %d elected as new leader\n", rf.me)
 			rf.heartbeat()
 			rf.mu.Unlock()
 			continue
 		}
 		rf.timeoutRemain -= 10
-		// Election timeout reached, start an election.
+		// Election timeout reached: Leader sends heartbeat, Candidate/Follower starts an election.
 		if rf.timeoutRemain < 0 {
 			rf.timeoutRemain = rf.timeoutValue
+			if rf.role == Leader {
+				rf.heartbeat()
+				rf.mu.Unlock()
+				continue
+			}
+			rf.term++
 			rf.role = Candidate
 			rf.votes = 0
-			rf.term++
 			rf.votedFor = rf.me
 			for peerID := range rf.peers {
 				if peerID != rf.me {
@@ -391,10 +407,10 @@ func checkElectionTimeout(rf *Raft) {
 					if len(rf.logs) > 0 {
 						lastLogTerm = rf.logs[len(rf.logs)-1].Term
 					}
-					var reply RequestVoteReply
-					go func() {
+					go func(peer int) {
+						var reply RequestVoteReply
 						ok := rf.sendRequestVote(
-							peerID,
+							peer,
 							&RequestVoteArgs{
 								Term:         rf.term,
 								CandidateId:  rf.me,
@@ -403,12 +419,19 @@ func checkElectionTimeout(rf *Raft) {
 							},
 							&reply,
 						)
-						if ok && reply.Granted {
+						if !ok {
+							log.Printf("Candidate %d failed to receive RequestVote RPC reply from server %d\n", rf.me, peer)
+							return
+						}
+						if reply.Term > rf.term {
+							rf.convertToFollower(reply.Term)
+						}
+						if reply.Granted {
 							rf.mu.Lock()
 							rf.votes++
 							rf.mu.Unlock()
 						}
-					}()
+					}(peerID)
 				}
 			}
 		}
@@ -438,9 +461,9 @@ func (rf *Raft) heartbeat() {
 	}
 	for peerID := range rf.peers {
 		if peerID != rf.me {
-			go func() {
+			go func(peer int) {
 				var reply AppendEntriesReply
-				ok := rf.sendAppendEntries(peerID, &AppendEntriesArgs{
+				ok := rf.sendAppendEntries(peer, &AppendEntriesArgs{
 					Term:         rf.term,
 					LeaderID:     rf.me,
 					PrevLogTerm:  prevLogTerm,
@@ -448,11 +471,14 @@ func (rf *Raft) heartbeat() {
 					Entries:      make([]LogEntry, 0),
 					LeaderCommit: rf.committedIndex,
 				}, &reply)
-				// Convert to follower if peer's term is newer.
-				if ok && rf.term < reply.Term {
-					rf.role = Follower
+				if !ok {
+					log.Printf("Candidate %d failed to receive AppendEntries RPC reply from server %d\n", rf.me, peer)
+					return
 				}
-			}()
+				if rf.term < reply.Term {
+					rf.convertToFollower(reply.Term)
+				}
+			}(peerID)
 		}
 	}
 }
@@ -461,4 +487,10 @@ func (rf *Raft) debug(s string, a ...interface{}) {
 	if rf.alive {
 		log.Printf(s, a...)
 	}
+}
+
+func (rf *Raft) convertToFollower(newTerm int) {
+	rf.role = Follower
+	rf.term = newTerm
+	rf.votedFor = -1
 }
