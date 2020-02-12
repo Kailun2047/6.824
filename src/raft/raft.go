@@ -402,48 +402,53 @@ func checkElectionTimeout(rf *Raft) {
 			rf.role = Candidate
 			rf.votes = 1
 			rf.votedFor = rf.me
-			lastLogTerm := 0
-			if len(rf.logs) > 0 {
-				lastLogTerm = rf.logs[len(rf.logs)-1].Term
-			}
-			// Pass copies of states to new goroutines to avoid inconsistency.
-			term := rf.term
-			lastLogIndex := len(rf.logs) - 1
-			for peerID := range rf.peers {
-				if peerID != rf.me {
-					go func(peer int) {
-						var reply RequestVoteReply
-						ok := rf.sendRequestVote(
-							peer,
-							&RequestVoteArgs{
-								Term:         term,
-								CandidateId:  rf.me,
-								LastLogIndex: lastLogIndex,
-								LastLogTerm:  lastLogTerm,
-							},
-							&reply,
-						)
-						if !ok {
-							rf.debug("RequestVote RPC failed between candidate %d and server %d\n", rf.me, peer)
-							return
-						}
-						rf.mu.Lock()
-						// Check that server's term hasn't changed after re-acquiring the lock.
-						if rf.term == term {
-							if reply.Term > term {
-								rf.convertToFollower(reply.Term)
-							}
-							if reply.Granted {
-								rf.votes++
-							}
-						}
-						rf.mu.Unlock()
-
-					}(peerID)
-				}
-			}
+			rf.getVotes()
 		}
 		rf.mu.Unlock()
+	}
+}
+
+// getVvotes() function should be used when lock is obtained.
+func (rf *Raft) getVotes() {
+	lastLogTerm := 0
+	if len(rf.logs) > 0 {
+		lastLogTerm = rf.logs[len(rf.logs)-1].Term
+	}
+	// Pass copies of states to new goroutines to avoid inconsistency.
+	term := rf.term
+	lastLogIndex := len(rf.logs) - 1
+	for peerID := range rf.peers {
+		if peerID != rf.me {
+			go func(peer int) {
+				var reply RequestVoteReply
+				ok := rf.sendRequestVote(
+					peer,
+					&RequestVoteArgs{
+						Term:         term,
+						CandidateId:  rf.me,
+						LastLogIndex: lastLogIndex,
+						LastLogTerm:  lastLogTerm,
+					},
+					&reply,
+				)
+				if !ok {
+					rf.debug("RequestVote RPC failed between candidate %d and server %d\n", rf.me, peer)
+					return
+				}
+				rf.mu.Lock()
+				// Check that server's term hasn't changed after re-acquiring the lock.
+				if rf.term == term {
+					if reply.Term > term {
+						rf.convertToFollower(reply.Term)
+					}
+					if reply.Granted {
+						rf.votes++
+					}
+				}
+				rf.mu.Unlock()
+
+			}(peerID)
+		}
 	}
 }
 
