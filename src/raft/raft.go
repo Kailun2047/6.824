@@ -264,14 +264,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	// If term of log at PrevLogIndex doesn't match leader's, return false
 	// so that leader will decrement PrevLogIndex.
-	if len(rf.logs) <= args.PrevLogIndex || args.PrevLogIndex == -1 || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if len(rf.logs) <= args.PrevLogIndex || args.PrevLogIndex > -1 && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
 		return
 	}
 	rf.timeoutRemain = rf.timeoutValue
 	// Remove conflicting entries (same index, different term) and append new ones from leader.
 	conflictIndex := len(rf.logs)
-	for i := args.PrevLogIndex; i < len(rf.logs); i++ {
+	for i := args.PrevLogIndex + 1; i < len(rf.logs); i++ {
 		if rf.logs[i].Term != args.Entries[i].Term {
 			conflictIndex = i
 			break
@@ -287,6 +287,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommit > rf.committedIndex {
 		rf.committedIndex = min(args.LeaderCommit, len(rf.logs)-1)
 	}
+	reply.Success = true
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -329,6 +330,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:    rf.term,
 			Command: command,
 		})
+		for i := range rf.nextIndex {
+			rf.nextIndex[i] = len(rf.logs)
+		}
 		term = rf.term
 		index = len(rf.logs) - 1
 		isLeader = true
@@ -371,14 +375,18 @@ func tryAppend(rf *Raft, peer int, args *AppendEntriesArgs) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.term == args.Term {
-		if args.Term < reply.Term {
-			rf.convertToFollower(reply.Term)
-			return
-		}
 		if !reply.Success {
+			if args.Term < reply.Term {
+				rf.convertToFollower(reply.Term)
+				return
+			}
 			rf.nextIndex[peer]--
 			args.Entries = rf.logs[rf.nextIndex[peer]:]
-			go tryAppend(rf, peer, args)
+			args.PrevLogIndex--
+			if args.PrevLogIndex > -1 {
+				args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+			}
+			tryAppend(rf, peer, args)
 		} else {
 			rf.nextIndex[peer] = len(rf.logs)
 			rf.matchIndex[peer] = len(rf.logs) - 1
@@ -452,9 +460,11 @@ func checkElectionTimeout(rf *Raft) {
 			if rf.nextIndex == nil {
 				rf.nextIndex = make([]int, len(rf.peers))
 				rf.matchIndex = make([]int, len(rf.peers))
-				// Conservatively set matchIndex to -1 (not sharing anything).
+				// Conservatively set matchIndex to -1 (not sharing anything),
+				// optimistically set nextIndex to len(rf.logs).
 				for i := range rf.matchIndex {
 					rf.matchIndex[i] = -1
+					rf.nextIndex[i] = len(rf.logs)
 				}
 			}
 			rf.heartbeat()
