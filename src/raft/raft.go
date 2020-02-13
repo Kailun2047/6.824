@@ -46,8 +46,8 @@ type ApplyMsg struct {
 
 // Log entry type.
 type LogEntry struct {
-	Term int
-	Data []byte
+	Term    int
+	Command interface{}
 }
 
 // Server roles.
@@ -84,8 +84,8 @@ type Raft struct {
 	committedIndex int
 	lastApplied    int
 	// Volatile states for leader.
-	nextIndex []int
-	lastMatch []int
+	nextIndex  []int
+	matchIndex []int
 	// Count of votes for candidate.
 	votes int
 	// For election timeout.
@@ -183,8 +183,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.convertToFollower(args.Term)
 	}
 	lastLog := LogEntry{
-		Term: -1,
-		Data: nil,
+		Term:    -1,
+		Command: nil,
 	}
 	if len(rf.logs) > 0 {
 		lastLog = rf.logs[len(rf.logs)-1]
@@ -319,12 +319,75 @@ func min(a, b int) int {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := false
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.role == Leader {
+		rf.logs = append(rf.logs, LogEntry{
+			Term:    rf.term,
+			Command: command,
+		})
+		term = rf.term
+		index = len(rf.logs) - 1
+		isLeader = true
+		rf.appendNewEntries()
+	}
 
 	return index, term, isLeader
 }
+
+func (rf *Raft) appendNewEntries() {
+	// Make a copy of leader states to avoid inconsistency.
+	prevLogIndex := -1
+	prevLogTerm := 0
+	if len(rf.logs) > 0 {
+		prevLogIndex = len(rf.logs) - 1
+		prevLogTerm = rf.logs[prevLogIndex].Term
+	}
+	for peerID := range rf.peers {
+		if peerID != rf.me {
+			args := &AppendEntriesArgs{
+				Term:         rf.term,
+				LeaderID:     rf.me,
+				PrevLogIndex: prevLogIndex,
+				PrevLogTerm:  prevLogTerm,
+				Entries:      rf.logs[rf.nextIndex[peerID]:],
+				LeaderCommit: rf.committedIndex,
+			}
+			go tryAppend(rf, peerID, args)
+		}
+	}
+}
+
+func tryAppend(rf *Raft, peer int, args *AppendEntriesArgs) {
+	var reply AppendEntriesReply
+	ok := rf.sendAppendEntries(peer, args, &reply)
+	if !ok {
+		log.Printf("AppendEntries RPC between leader %d and server %d failed\n", rf.me, peer)
+		return
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.term == args.Term {
+		if args.Term < reply.Term {
+			rf.convertToFollower(reply.Term)
+			return
+		}
+		if !reply.Success {
+			rf.nextIndex[peer]--
+			args.Entries = rf.logs[rf.nextIndex[peer]:]
+			go tryAppend(rf, peer, args)
+		} else {
+			rf.nextIndex[peer] = len(rf.logs)
+			rf.matchIndex[peer] = len(rf.logs) - 1
+		}
+	}
+}
+
+// TODO: to have a dedicated "applier" to apply log entry
+// when committedIndex > lastApplied.
 
 //
 // the tester calls Kill() when a Raft instance won't
@@ -385,6 +448,15 @@ func checkElectionTimeout(rf *Raft) {
 			rf.role = Leader
 			rf.votedFor = -1
 			rf.debug("Server %d elected as new leader\n", rf.me)
+			// When a server first comes to power, initialize nextIndex[] and matchIndex[].
+			if rf.nextIndex == nil {
+				rf.nextIndex = make([]int, len(rf.peers))
+				rf.matchIndex = make([]int, len(rf.peers))
+				// Conservatively set matchIndex to -1 (not sharing anything).
+				for i := range rf.matchIndex {
+					rf.matchIndex[i] = -1
+				}
+			}
 			rf.heartbeat()
 			rf.mu.Unlock()
 			continue
@@ -408,7 +480,7 @@ func checkElectionTimeout(rf *Raft) {
 	}
 }
 
-// getVvotes() function should be used when lock is obtained.
+// getVotes() function should be used when lock is obtained.
 func (rf *Raft) getVotes() {
 	lastLogTerm := 0
 	if len(rf.logs) > 0 {
@@ -508,6 +580,7 @@ func (rf *Raft) debug(s string, a ...interface{}) {
 	}
 }
 
+// convertToFollower() should be used when lock is held.
 func (rf *Raft) convertToFollower(newTerm int) {
 	rf.role = Follower
 	rf.term = newTerm
