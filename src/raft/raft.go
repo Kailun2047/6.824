@@ -75,24 +75,20 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	role Role
-	// Persistent states.
-	votedFor int
-	term     int
-	logs     []LogEntry
-	// Volatile states for all servers.
+	role           Role
+	votedFor       int
+	term           int
+	logs           []LogEntry
 	committedIndex int
 	lastApplied    int
-	// Volatile states for leader.
-	nextIndex  []int
-	matchIndex []int
-	// Count of votes for candidate.
-	votes int
-	// For election timeout.
-	timeoutValue  int
-	timeoutRemain int
-	// For debugging.
-	alive bool
+	nextIndex      []int
+	matchIndex     []int
+	votes          int // Count of votes for candidate in current term.
+	timeoutValue   int
+	timeoutRemain  int
+	alive          bool          // For debugging.
+	applyCh        chan ApplyMsg // For server to apply new entries.
+	cond           *sync.Cond    // To kick the apply entries gorontine.
 }
 
 // return currentTerm and whether this server
@@ -250,15 +246,15 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.debug("Follower %d (term: %d) receives AppendEntries RPC from leader %d (term: %d)\n", rf.me, rf.term, args.LeaderID, args.Term)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	rf.debug("Follower %d (index: %d, term: %d, time remain: %d) receives AppendEntries RPC from leader %d (PrevLogIndex: %d, term: %d)\n", rf.me, len(rf.logs)-1, rf.term, rf.timeoutRemain, args.LeaderID, args.PrevLogIndex, args.Term)
 	reply.Term = rf.term
-	// If leader's term is stale, return false.
 	if args.Term < rf.term {
 		reply.Success = false
 		return
 	}
+	rf.timeoutRemain = rf.timeoutValue
 	if args.Term > rf.term {
 		rf.convertToFollower(args.Term)
 	}
@@ -268,25 +264,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
-	rf.timeoutRemain = rf.timeoutValue
-	// Remove conflicting entries (same index, different term) and append new ones from leader.
-	conflictIndex := len(rf.logs)
-	for i := args.PrevLogIndex + 1; i < len(rf.logs); i++ {
-		if rf.logs[i].Term != args.Entries[i].Term {
-			conflictIndex = i
+	conflictIndex := -1
+	for i := 0; i < len(args.Entries); i++ {
+		idx := args.PrevLogIndex + 1 + i
+		if idx >= len(rf.logs) || rf.logs[idx].Term != args.Entries[idx].Term {
+			conflictIndex = idx
 			break
 		}
 	}
-	rf.logs = rf.logs[:conflictIndex]
-	if conflictIndex < len(rf.logs) {
-		for i := conflictIndex; i < len(args.Entries); i++ {
+	// Truncate old logs and append new logs ONLY IF there is a conflicting entry.
+	if conflictIndex != -1 {
+		rf.logs = rf.logs[:conflictIndex]
+		for i := conflictIndex - args.PrevLogIndex - 1; i < len(args.Entries); i++ {
 			rf.logs = append(rf.logs, args.Entries[i])
 		}
 	}
-	// Update commitIndex if necessary.
 	if args.LeaderCommit > rf.committedIndex {
-		rf.committedIndex = min(args.LeaderCommit, len(rf.logs)-1)
+		// min() is necessary since LeaderCommit could be beyond
+		// the up-to-date entries on this follower.
+		rf.committedIndex = min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
 	}
+	rf.cond.Signal()
 	reply.Success = true
 }
 
@@ -330,9 +328,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:    rf.term,
 			Command: command,
 		})
-		for i := range rf.nextIndex {
-			rf.nextIndex[i] = len(rf.logs)
-		}
 		term = rf.term
 		index = len(rf.logs) - 1
 		isLeader = true
@@ -344,14 +339,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 func (rf *Raft) appendNewEntries() {
 	// Make a copy of leader states to avoid inconsistency.
-	prevLogIndex := -1
-	prevLogTerm := 0
-	if len(rf.logs) > 0 {
-		prevLogIndex = len(rf.logs) - 1
-		prevLogTerm = rf.logs[prevLogIndex].Term
-	}
 	for peerID := range rf.peers {
 		if peerID != rf.me {
+			prevLogIndex := rf.nextIndex[peerID] - 1
+			prevLogTerm := 0
+			if prevLogIndex >= 0 {
+				prevLogTerm = rf.logs[prevLogIndex].Term
+			}
 			args := &AppendEntriesArgs{
 				Term:         rf.term,
 				LeaderID:     rf.me,
@@ -366,6 +360,7 @@ func (rf *Raft) appendNewEntries() {
 }
 
 func tryAppend(rf *Raft, peer int, args *AppendEntriesArgs) {
+	rf.debug("Leader %d tries appending new logs.\n", rf.me)
 	var reply AppendEntriesReply
 	ok := rf.sendAppendEntries(peer, args, &reply)
 	if !ok {
@@ -389,7 +384,7 @@ func tryAppend(rf *Raft, peer int, args *AppendEntriesArgs) {
 			tryAppend(rf, peer, args)
 		} else {
 			rf.nextIndex[peer] = len(rf.logs)
-			rf.matchIndex[peer] = len(rf.logs) - 1
+			rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
 		}
 	}
 }
@@ -427,6 +422,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.applyCh = applyCh
+	rf.cond = sync.NewCond(&rf.mu)
 	rf.term = 0
 	rf.votedFor = -1
 	rf.role = Follower
@@ -436,6 +433,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.timeoutRemain = rf.timeoutValue
 	go checkElectionTimeout(rf)
 	go checkHeartbeat(rf)
+	go checkApplyEntries(rf)
 
 	// TODO: apply commited logs and update lastApplied.
 
@@ -450,8 +448,6 @@ func checkElectionTimeout(rf *Raft) {
 		time.Sleep(10 * time.Millisecond)
 		rf.mu.Lock()
 		rf.timeoutRemain -= 10
-		// Convert to (or remain) Candidate when follower's (or Candidate's)
-		// election timeout is reached, and trigger new election.
 		if rf.role == Candidate && rf.votes > len(rf.peers)/2 {
 			rf.role = Leader
 			rf.votedFor = -1
@@ -471,7 +467,7 @@ func checkElectionTimeout(rf *Raft) {
 			rf.mu.Unlock()
 			continue
 		}
-		// Election timeout reached: Leader sends heartbeat, Candidate/Follower starts an election.
+		// Election timeout reached: Candidate/Follower starts an election.
 		if rf.timeoutRemain < 0 {
 			rf.debug("Election timeout reached on server %d\n", rf.me)
 			rf.timeoutRemain = rf.timeoutValue
@@ -538,7 +534,6 @@ func checkHeartbeat(rf *Raft) {
 	for {
 		time.Sleep((time.Duration)(HeartbeatTimeout) * time.Millisecond)
 		rf.mu.Lock()
-		// If server's role is Leader, send out AppendEntries periodically.
 		if rf.role == Leader {
 			rf.heartbeat()
 		}
@@ -546,14 +541,56 @@ func checkHeartbeat(rf *Raft) {
 	}
 }
 
+func checkApplyEntries(rf *Raft) {
+	go applyEntries(rf)
+	for {
+		time.Sleep(10 * time.Millisecond)
+		rf.mu.Lock()
+		if rf.role == Leader {
+			newCommittedIndex := rf.committedIndex
+			for i := range rf.peers {
+				if rf.matchIndex[i] > newCommittedIndex {
+					count := 0
+					for j := range rf.peers {
+						if rf.matchIndex[j] >= rf.matchIndex[i] {
+							count++
+						}
+					}
+					if count > len(rf.peers)/2 {
+						newCommittedIndex = rf.matchIndex[i]
+					}
+				}
+			}
+			if newCommittedIndex > rf.committedIndex {
+				rf.committedIndex = newCommittedIndex
+				rf.cond.Signal()
+			}
+		}
+		rf.mu.Unlock()
+	}
+}
+
+func applyEntries(rf *Raft) {
+	for {
+		time.Sleep(10 * time.Millisecond)
+		rf.cond.L.Lock()
+		rf.cond.Wait()
+		for rf.lastApplied < rf.committedIndex {
+			rf.lastApplied++
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      rf.logs[rf.lastApplied],
+				CommandIndex: rf.lastApplied,
+			}
+		}
+		rf.cond.L.Unlock()
+	}
+}
+
 // heartbeat() function should be used when lock is obtained.
 func (rf *Raft) heartbeat() {
 	prevLogIndex := -1
 	prevLogTerm := 0
-	if len(rf.logs) > 0 {
-		prevLogIndex = len(rf.logs) - 1
-		prevLogTerm = rf.logs[prevLogIndex].Term
-	}
 	// Pass copies of states to new goroutines to avoid inconsistency.
 	term := rf.term
 	committedIndex := rf.committedIndex
