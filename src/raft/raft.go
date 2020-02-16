@@ -267,7 +267,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	conflictIndex := 0
 	for i := 0; i < len(args.Entries); i++ {
 		idx := args.PrevLogIndex + 1 + i
-		if idx >= len(rf.logs) || rf.logs[idx].Term != args.Entries[idx].Term {
+		if idx >= len(rf.logs) || rf.logs[idx].Term != args.Entries[i].Term {
 			conflictIndex = idx
 			break
 		}
