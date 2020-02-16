@@ -331,6 +331,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.term
 		index = len(rf.logs) - 1
 		isLeader = true
+		rf.matchIndex[rf.me] = index
 		rf.appendNewEntries()
 	}
 
@@ -422,10 +423,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.logs = make([]LogEntry, 1)
 	rf.applyCh = applyCh
 	rf.cond = sync.NewCond(&rf.mu)
-	rf.term = 0
 	rf.votedFor = -1
 	rf.role = Follower
-	rf.votes = 0
 	rf.alive = true
 	rf.timeoutValue = MinElectionTimeout + rand.Intn(MinElectionTimeout/2)
 	rf.timeoutRemain = rf.timeoutValue
