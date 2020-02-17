@@ -87,6 +87,7 @@ type Raft struct {
 	timeoutValue   int
 	timeoutRemain  int
 	alive          bool          // For debugging.
+	enableDebug    bool          // For Debugging.
 	applyCh        chan ApplyMsg // For server to apply new entries.
 	cond           *sync.Cond    // To kick the apply entries gorontine.
 }
@@ -166,7 +167,7 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	rf.debug("Server %d receives RequestVote RPC from candidate %d\n", rf.me, args.CandidateId)
+	rf.debug("Server %d (index: %d, term: %d) receives RequestVote RPC from candidate %d (index: %d, term: %d)\n", rf.me, len(rf.logs)-1, rf.term, args.CandidateId, args.LastLogIndex, args.Term)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.term
@@ -179,14 +180,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.convertToFollower(args.Term)
 	}
 	lastLog := LogEntry{
-		Term:    -1,
+		Term:    0,
 		Command: nil,
 	}
-	if len(rf.logs) > 0 {
+	if len(rf.logs) > 1 {
 		lastLog = rf.logs[len(rf.logs)-1]
 	}
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-		(lastLog.Term == 0 || args.LastLogTerm > lastLog.Term || args.LastLogTerm == lastLog.Term && args.LastLogIndex >= len(rf.logs)-1) {
+		(args.LastLogTerm > lastLog.Term || args.LastLogTerm == lastLog.Term && args.LastLogIndex >= len(rf.logs)-1) {
 		rf.votedFor = args.CandidateId
 		rf.timeoutRemain = rf.timeoutValue
 		rf.debug("Server %d grants vote to candidate %d\n", rf.me, args.CandidateId)
@@ -324,6 +325,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.role == Leader {
+		rf.debug("Leader %d starts agreement on command %d.\n", rf.me, command.(int))
 		rf.logs = append(rf.logs, LogEntry{
 			Term:    rf.term,
 			Command: command,
@@ -365,7 +367,7 @@ func tryAppend(rf *Raft, peer int, args *AppendEntriesArgs) {
 	var reply AppendEntriesReply
 	ok := rf.sendAppendEntries(peer, args, &reply)
 	if !ok {
-		log.Printf("AppendEntries RPC between leader %d and server %d failed\n", rf.me, peer)
+		rf.debug("AppendEntries RPC between leader %d and server %d failed\n", rf.me, peer)
 		return
 	}
 	rf.mu.Lock()
@@ -379,10 +381,12 @@ func tryAppend(rf *Raft, peer int, args *AppendEntriesArgs) {
 			rf.nextIndex[peer]--
 			args.Entries = rf.logs[rf.nextIndex[peer]:]
 			args.PrevLogIndex--
-			if args.PrevLogIndex > -1 {
+			if args.PrevLogIndex > 0 {
 				args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+			} else {
+				args.PrevLogTerm = 0
 			}
-			tryAppend(rf, peer, args)
+			go tryAppend(rf, peer, args)
 		} else {
 			rf.nextIndex[peer] = len(rf.logs)
 			rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
@@ -426,6 +430,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.role = Follower
 	rf.alive = true
+	rf.enableDebug = false // Disable logging to run 2B.
 	rf.timeoutValue = MinElectionTimeout + rand.Intn(MinElectionTimeout/2)
 	rf.timeoutRemain = rf.timeoutValue
 	go checkElectionTimeout(rf)
@@ -483,13 +488,13 @@ func checkElectionTimeout(rf *Raft) {
 
 // getVotes() function should be used when lock is obtained.
 func (rf *Raft) getVotes() {
-	lastLogTerm := 0
-	if len(rf.logs) > 0 {
-		lastLogTerm = rf.logs[len(rf.logs)-1].Term
-	}
 	// Pass copies of states to new goroutines to avoid inconsistency.
 	term := rf.term
+	lastLogTerm := 0
 	lastLogIndex := len(rf.logs) - 1
+	if lastLogIndex > 0 {
+		lastLogTerm = rf.logs[lastLogIndex].Term
+	}
 	for peerID := range rf.peers {
 		if peerID != rf.me {
 			go func(peer int) {
@@ -558,7 +563,6 @@ func checkApplyEntries(rf *Raft) {
 			}
 			if newCommittedIndex > rf.committedIndex {
 				rf.committedIndex = newCommittedIndex
-				rf.matchIndex[rf.me] = rf.committedIndex
 				rf.debug("Leader %d updated committedIndex to %d.\n", rf.me, rf.committedIndex)
 				rf.cond.Broadcast()
 			}
@@ -623,7 +627,7 @@ func (rf *Raft) heartbeat() {
 }
 
 func (rf *Raft) debug(s string, a ...interface{}) {
-	if rf.alive {
+	if rf.alive && rf.enableDebug {
 		log.Printf(s, a...)
 	}
 }
@@ -633,4 +637,5 @@ func (rf *Raft) convertToFollower(newTerm int) {
 	rf.role = Follower
 	rf.term = newTerm
 	rf.votedFor = -1
+	rf.debug("Server %d converts to follower.\n", rf.me)
 }
