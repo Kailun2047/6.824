@@ -50,11 +50,12 @@ type config struct {
 	logs      []map[int]int // copy of each server's committed entries
 	start     time.Time     // time at which make_config() was called
 	// begin()/end() statistics
-	t0        time.Time // time at which test_test.go called cfg.begin()
-	rpcs0     int       // rpcTotal() at start of test
-	cmds0     int       // number of agreements
-	maxIndex  int
-	maxIndex0 int
+	t0          time.Time // time at which test_test.go called cfg.begin()
+	rpcs0       int       // rpcTotal() at start of test
+	cmds0       int       // number of agreements
+	maxIndex    int
+	maxIndex0   int
+	enableDebug bool
 }
 
 var ncpu_once sync.Once
@@ -78,6 +79,7 @@ func make_config(t *testing.T, n int, unreliable bool) *config {
 	cfg.endnames = make([][]string, cfg.n)
 	cfg.logs = make([]map[int]int, cfg.n)
 	cfg.start = time.Now()
+	cfg.enableDebug = false
 
 	cfg.setunreliable(unreliable)
 
@@ -99,6 +101,9 @@ func make_config(t *testing.T, n int, unreliable bool) *config {
 
 // shut down a Raft server but save its persistent state.
 func (cfg *config) crash1(i int) {
+	if cfg.enableDebug {
+		log.Printf("Server %d crashes.\n", i)
+	}
 	cfg.disconnect(i)
 	cfg.net.DeleteServer(i) // disable client connections to the server.
 
@@ -236,7 +241,9 @@ func (cfg *config) cleanup() {
 
 // attach server i to the net.
 func (cfg *config) connect(i int) {
-	// fmt.Printf("connect(%d)\n", i)
+	if cfg.enableDebug {
+		fmt.Printf("connect(%d)\n", i)
+	}
 
 	cfg.connected[i] = true
 
@@ -259,7 +266,9 @@ func (cfg *config) connect(i int) {
 
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
-	// fmt.Printf("disconnect(%d)\n", i)
+	if cfg.enableDebug {
+		fmt.Printf("disconnect(%d)\n", i)
+	}
 
 	cfg.connected[i] = false
 

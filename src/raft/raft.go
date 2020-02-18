@@ -250,10 +250,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term            int
-	Success         bool
-	ConflictingTerm int
-	FirstIndex      int // Follower's first index of conflicting term.
+	Term             int
+	Success          bool
+	ConflictingTerm  int
+	ConflictingIndex int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -272,16 +272,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// If term of log at PrevLogIndex doesn't match leader's, return false
 	// so that leader will decrement PrevLogIndex.
 	if len(rf.logs) <= args.PrevLogIndex || args.PrevLogIndex > 0 && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
-		conflictingIndex := len(rf.logs) - 1
-		if len(rf.logs) > args.PrevLogIndex {
-			conflictingIndex = args.PrevLogIndex
+		conflictingIndex := len(rf.logs)
+		if len(rf.logs) <= args.PrevLogIndex {
+			reply.ConflictingIndex = conflictingIndex
+			reply.ConflictingTerm = -1
+		} else {
+			conflictingIndex--
+			reply.ConflictingTerm = rf.logs[conflictingIndex].Term
+			for conflictingIndex > 0 && rf.logs[conflictingIndex].Term == reply.ConflictingTerm {
+				conflictingIndex--
+			}
+			reply.ConflictingIndex = conflictingIndex
 		}
-		reply.ConflictingTerm = rf.logs[conflictingIndex].Term
-		firstIndex := conflictingIndex
-		for firstIndex > 0 && rf.logs[firstIndex].Term == reply.ConflictingTerm {
-			firstIndex--
-		}
-		reply.FirstIndex = firstIndex
 		reply.Success = false
 		return
 	}
@@ -400,17 +402,22 @@ func tryAppend(rf *Raft, peer int, args *AppendEntriesArgs) {
 				rf.convertToFollower(reply.Term)
 				return
 			}
-			firstIndex := -1
-			for idx, log := range rf.logs {
-				if log.Term == reply.ConflictingTerm {
-					firstIndex = idx
-					break
+			// If follower doesn't have PrevLogIndex or leader doesn't have logs
+			// with ConflictingTerm, set nextIndex to Conflicting Index;
+			// if leader has logs with ConflictingTerm (i.e. follower has more logs
+			// with ConflictingTerm than leader), set nextIndex to the index beyond
+			// the last entry on the leader with that term.
+			rf.nextIndex[peer] = reply.ConflictingIndex
+			if reply.ConflictingTerm != -1 {
+				for i := range rf.logs {
+					if rf.logs[i].Term == reply.ConflictingTerm {
+						for i < len(rf.logs) && rf.logs[i].Term == reply.ConflictingTerm {
+							i++
+						}
+						rf.nextIndex[peer] = i
+						break
+					}
 				}
-			}
-			if firstIndex > -1 {
-				rf.nextIndex[peer] = firstIndex
-			} else {
-				rf.nextIndex[peer] = reply.FirstIndex
 			}
 			args.Entries = rf.logs[rf.nextIndex[peer]:]
 			args.PrevLogIndex = rf.nextIndex[peer] - 1
@@ -459,7 +466,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.role = Follower
 	rf.alive = true
-	rf.enableDebug = true
+	rf.enableDebug = false
 	rf.timeoutValue = MinElectionTimeout + rand.Intn(MinElectionTimeout/2)
 	rf.timeoutRemain = rf.timeoutValue
 	go checkElectionTimeout(rf)
@@ -492,7 +499,7 @@ func checkElectionTimeout(rf *Raft) {
 					rf.nextIndex[i] = len(rf.logs)
 				}
 			}
-			rf.heartbeat()
+			rf.appendNewEntries()
 			rf.mu.Unlock()
 			continue
 		}
@@ -565,7 +572,7 @@ func checkHeartbeat(rf *Raft) {
 		time.Sleep((time.Duration)(HeartbeatTimeout) * time.Millisecond)
 		rf.mu.Lock()
 		if rf.role == Leader {
-			rf.heartbeat()
+			rf.appendNewEntries()
 		}
 		rf.mu.Unlock()
 	}
@@ -616,43 +623,6 @@ func applyEntries(rf *Raft) {
 			rf.debug("Server %d applied log (index: %d).\n", rf.me, rf.lastApplied)
 		}
 		rf.cond.L.Unlock()
-	}
-}
-
-// heartbeat() function should be used when lock is obtained.
-func (rf *Raft) heartbeat() {
-	// Pass copies of states to new goroutines to avoid inconsistency.
-	term := rf.term
-	committedIndex := rf.committedIndex
-	for peerID := range rf.peers {
-		if peerID != rf.me {
-			prevLogIndex := rf.nextIndex[peerID] - 1
-			prevLogTerm := 0
-			if prevLogIndex > 0 {
-				prevLogTerm = rf.logs[prevLogIndex].Term
-			}
-			go func(peer int) {
-				var reply AppendEntriesReply
-				ok := rf.sendAppendEntries(peer, &AppendEntriesArgs{
-					Term:         term,
-					LeaderID:     rf.me,
-					PrevLogTerm:  prevLogTerm,
-					PrevLogIndex: prevLogIndex,
-					Entries:      make([]LogEntry, 0),
-					LeaderCommit: committedIndex,
-				}, &reply)
-				if !ok {
-					rf.debug("AppendEntries RPC failed between leader %d and server %d\n", rf.me, peer)
-					return
-				}
-				rf.mu.Lock()
-				// Check that server's term hasn't changed after re-acquiring the lock.
-				if rf.term == term && rf.term < reply.Term {
-					rf.convertToFollower(reply.Term)
-				}
-				rf.mu.Unlock()
-			}(peerID)
-		}
 	}
 }
 
