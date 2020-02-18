@@ -115,7 +115,11 @@ func (rf *Raft) persist() {
 	enc := labgob.NewEncoder(buf)
 	enc.Encode(rf.votedFor)
 	enc.Encode(rf.term)
-	enc.Encode(rf.logs)
+	for i, log := range rf.logs {
+		if i > 0 {
+			enc.Encode(log)
+		}
+	}
 	data := buf.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -129,15 +133,18 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	buf := bytes.NewBuffer(data)
 	dec := labgob.NewDecoder(buf)
-	var term int
 	var votedFor int
-	var logs []LogEntry
-	if dec.Decode(&term) != nil || dec.Decode(&votedFor) != nil || dec.Decode(logs) != nil {
+	var term int
+	if dec.Decode(&votedFor) != nil || dec.Decode(&term) != nil {
 		log.Fatalln("Fail to decode persisted data")
+	}
+	var entry LogEntry
+	for dec.Decode(&entry) == nil {
+		rf.debug("Server %d recovers a log at index %d.\n", rf.me, len(rf.logs))
+		rf.logs = append(rf.logs, entry)
 	}
 	rf.term = term
 	rf.votedFor = votedFor
-	rf.logs = logs
 }
 
 //
@@ -189,6 +196,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
 		(args.LastLogTerm > lastLog.Term || args.LastLogTerm == lastLog.Term && args.LastLogIndex >= len(rf.logs)-1) {
 		rf.votedFor = args.CandidateId
+		rf.persist()
 		rf.timeoutRemain = rf.timeoutValue
 		rf.debug("Server %d grants vote to candidate %d\n", rf.me, args.CandidateId)
 		reply.Granted = true
@@ -242,8 +250,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term            int
+	Success         bool
+	ConflictingTerm int
+	FirstIndex      int // Follower's first index of conflicting term.
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -262,6 +272,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// If term of log at PrevLogIndex doesn't match leader's, return false
 	// so that leader will decrement PrevLogIndex.
 	if len(rf.logs) <= args.PrevLogIndex || args.PrevLogIndex > 0 && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+		conflictingIndex := len(rf.logs) - 1
+		if len(rf.logs) > args.PrevLogIndex {
+			conflictingIndex = args.PrevLogIndex
+		}
+		reply.ConflictingTerm = rf.logs[conflictingIndex].Term
+		firstIndex := conflictingIndex
+		for firstIndex > 0 && rf.logs[firstIndex].Term == reply.ConflictingTerm {
+			firstIndex--
+		}
+		reply.FirstIndex = firstIndex
 		reply.Success = false
 		return
 	}
@@ -279,6 +299,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		for i := conflictIndex - args.PrevLogIndex - 1; i < len(args.Entries); i++ {
 			rf.logs = append(rf.logs, args.Entries[i])
 		}
+		rf.persist()
 	}
 	if args.LeaderCommit > rf.committedIndex {
 		// min() is necessary since LeaderCommit could be beyond
@@ -330,6 +351,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:    rf.term,
 			Command: command,
 		})
+		rf.persist()
 		term = rf.term
 		index = len(rf.logs) - 1
 		isLeader = true
@@ -378,14 +400,21 @@ func tryAppend(rf *Raft, peer int, args *AppendEntriesArgs) {
 				rf.convertToFollower(reply.Term)
 				return
 			}
-			rf.nextIndex[peer]--
-			args.Entries = rf.logs[rf.nextIndex[peer]:]
-			args.PrevLogIndex--
-			if args.PrevLogIndex > 0 {
-				args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
-			} else {
-				args.PrevLogTerm = 0
+			firstIndex := -1
+			for idx, log := range rf.logs {
+				if log.Term == reply.ConflictingTerm {
+					firstIndex = idx
+					break
+				}
 			}
+			if firstIndex > -1 {
+				rf.nextIndex[peer] = firstIndex
+			} else {
+				rf.nextIndex[peer] = reply.FirstIndex
+			}
+			args.Entries = rf.logs[rf.nextIndex[peer]:]
+			args.PrevLogIndex = rf.nextIndex[peer] - 1
+			args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
 			go tryAppend(rf, peer, args)
 		} else {
 			rf.nextIndex[peer] = len(rf.logs)
@@ -430,7 +459,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.role = Follower
 	rf.alive = true
-	rf.enableDebug = false // Disable logging to run 2B.
+	rf.enableDebug = true
 	rf.timeoutValue = MinElectionTimeout + rand.Intn(MinElectionTimeout/2)
 	rf.timeoutRemain = rf.timeoutValue
 	go checkElectionTimeout(rf)
@@ -480,6 +509,7 @@ func checkElectionTimeout(rf *Raft) {
 			rf.role = Candidate
 			rf.votes = 1
 			rf.votedFor = rf.me
+			rf.persist()
 			rf.getVotes()
 		}
 		rf.mu.Unlock()
@@ -637,5 +667,6 @@ func (rf *Raft) convertToFollower(newTerm int) {
 	rf.role = Follower
 	rf.term = newTerm
 	rf.votedFor = -1
+	rf.persist()
 	rf.debug("Server %d converts to follower.\n", rf.me)
 }
