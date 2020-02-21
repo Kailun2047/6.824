@@ -17,11 +17,13 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Type  string
+	Key   string
+	Value string
 }
 
 type KVServer struct {
@@ -33,12 +35,43 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	executed map[int]string // Record executed command numbers.
+	pairs    map[string]string
+	cond     *sync.Cond
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if result, ok := kv.executed[args.CommandNumber]; ok {
+		reply = &GetReply{
+			WrongLeader: false,
+			Err:         "",
+			Value:       result,
+		}
+		return
+	}
+	_, _, isLeader := kv.rf.Start(Op{
+		Type:  "Get",
+		Key:   args.Key,
+		Value: "",
+	})
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+	kv.cond.Wait()
+	val, _ := kv.pairs[args.Key]
+	reply = &GetReply{
+		WrongLeader: false,
+		Err:         "",
+		Value:       val,
+	}
+	return
 }
+
+// TODO: add long-term goroutine to read applyCh.
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
@@ -79,11 +112,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
+	kv.executed = make(map[int]string)
+	kv.pairs = make(map[string]string)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.cond = sync.NewCond(&kv.mu)
 
 	return kv
 }
