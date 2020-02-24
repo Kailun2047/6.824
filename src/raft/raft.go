@@ -90,6 +90,7 @@ type Raft struct {
 	enableDebug    bool          // For Debugging.
 	applyCh        chan ApplyMsg // For server to apply new entries.
 	cond           *sync.Cond    // To kick the apply entries gorontine.
+	muCond         sync.Mutex
 }
 
 // return currentTerm and whether this server
@@ -272,12 +273,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// If term of log at PrevLogIndex doesn't match leader's, return false
 	// so that leader will decrement PrevLogIndex.
 	if len(rf.logs) <= args.PrevLogIndex || args.PrevLogIndex > 0 && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
-		conflictingIndex := len(rf.logs)
 		if len(rf.logs) <= args.PrevLogIndex {
-			reply.ConflictingIndex = conflictingIndex
+			reply.ConflictingIndex = len(rf.logs)
 			reply.ConflictingTerm = -1
 		} else {
-			conflictingIndex--
+			conflictingIndex := len(rf.logs) - 1
 			reply.ConflictingTerm = rf.logs[conflictingIndex].Term
 			for conflictingIndex > 0 && rf.logs[conflictingIndex].Term == reply.ConflictingTerm {
 				conflictingIndex--
@@ -307,7 +307,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// min() is necessary since LeaderCommit could be beyond
 		// the up-to-date entries on this follower.
 		rf.committedIndex = min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
+		rf.cond.L.Lock()
 		rf.cond.Broadcast()
+		rf.cond.L.Unlock()
 	}
 	reply.Success = true
 }
@@ -348,7 +350,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.role == Leader {
-		rf.debug("Leader %d starts agreement on command %d.\n", rf.me, command.(int))
+		rf.debug("Leader %d starts agreement on command %v.\n", rf.me, command)
 		rf.logs = append(rf.logs, LogEntry{
 			Term:    rf.term,
 			Command: command,
@@ -387,7 +389,6 @@ func (rf *Raft) appendNewEntries() {
 }
 
 func tryAppend(rf *Raft, peer int, args *AppendEntriesArgs) {
-	rf.debug("Leader %d tries appending new logs.\n", rf.me)
 	var reply AppendEntriesReply
 	ok := rf.sendAppendEntries(peer, args, &reply)
 	if !ok {
@@ -462,11 +463,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.logs = make([]LogEntry, 1)
 	rf.applyCh = applyCh
-	rf.cond = sync.NewCond(&rf.mu)
+	rf.cond = sync.NewCond(&rf.muCond)
 	rf.votedFor = -1
 	rf.role = Follower
 	rf.alive = true
-	rf.enableDebug = false
+	rf.enableDebug = true
 	rf.timeoutValue = MinElectionTimeout + rand.Intn(MinElectionTimeout/2)
 	rf.timeoutRemain = rf.timeoutValue
 	go checkElectionTimeout(rf)
@@ -601,7 +602,9 @@ func checkApplyEntries(rf *Raft) {
 			if newCommittedIndex > rf.committedIndex {
 				rf.committedIndex = newCommittedIndex
 				rf.debug("Leader %d updated committedIndex to %d.\n", rf.me, rf.committedIndex)
+				rf.cond.L.Lock()
 				rf.cond.Broadcast()
+				rf.cond.L.Unlock()
 			}
 		}
 		rf.mu.Unlock()
@@ -612,7 +615,9 @@ func applyEntries(rf *Raft) {
 	for {
 		time.Sleep(10 * time.Millisecond)
 		rf.cond.L.Lock()
-		rf.cond.Wait()
+		for rf.lastApplied == rf.committedIndex {
+			rf.cond.Wait()
+		}
 		for rf.lastApplied < rf.committedIndex {
 			rf.lastApplied++
 			rf.applyCh <- ApplyMsg{
