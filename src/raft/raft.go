@@ -90,7 +90,6 @@ type Raft struct {
 	enableDebug    bool          // For Debugging.
 	applyCh        chan ApplyMsg // For server to apply new entries.
 	cond           *sync.Cond    // To kick the apply entries gorontine.
-	muCond         sync.Mutex
 }
 
 // return currentTerm and whether this server
@@ -307,9 +306,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// min() is necessary since LeaderCommit could be beyond
 		// the up-to-date entries on this follower.
 		rf.committedIndex = min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
-		rf.cond.L.Lock()
 		rf.cond.Broadcast()
-		rf.cond.L.Unlock()
 	}
 	reply.Success = true
 }
@@ -370,7 +367,7 @@ func (rf *Raft) appendNewEntries() {
 	// Make a copy of leader states to avoid inconsistency.
 	for peerID := range rf.peers {
 		if peerID != rf.me {
-			prevLogIndex := rf.nextIndex[peerID] - 1
+			prevLogIndex := min(rf.nextIndex[peerID]-1, len(rf.logs)-1)
 			prevLogTerm := 0
 			if prevLogIndex > 0 {
 				prevLogTerm = rf.logs[prevLogIndex].Term
@@ -380,7 +377,7 @@ func (rf *Raft) appendNewEntries() {
 				LeaderID:     rf.me,
 				PrevLogIndex: prevLogIndex,
 				PrevLogTerm:  prevLogTerm,
-				Entries:      rf.logs[rf.nextIndex[peerID]:],
+				Entries:      rf.logs[(prevLogIndex + 1):],
 				LeaderCommit: rf.committedIndex,
 			}
 			go tryAppend(rf, peerID, args)
@@ -463,11 +460,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.logs = make([]LogEntry, 1)
 	rf.applyCh = applyCh
-	rf.cond = sync.NewCond(&rf.muCond)
+	rf.cond = sync.NewCond(&rf.mu)
 	rf.votedFor = -1
 	rf.role = Follower
 	rf.alive = true
-	rf.enableDebug = true
+	rf.enableDebug = false
 	rf.timeoutValue = MinElectionTimeout + rand.Intn(MinElectionTimeout/2)
 	rf.timeoutRemain = rf.timeoutValue
 	go checkElectionTimeout(rf)
@@ -602,9 +599,7 @@ func checkApplyEntries(rf *Raft) {
 			if newCommittedIndex > rf.committedIndex {
 				rf.committedIndex = newCommittedIndex
 				rf.debug("Leader %d updated committedIndex to %d.\n", rf.me, rf.committedIndex)
-				rf.cond.L.Lock()
 				rf.cond.Broadcast()
-				rf.cond.L.Unlock()
 			}
 		}
 		rf.mu.Unlock()
