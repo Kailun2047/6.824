@@ -613,15 +613,26 @@ func applyEntries(rf *Raft) {
 		for rf.lastApplied == rf.committedIndex {
 			rf.cond.Wait()
 		}
-		for rf.lastApplied < rf.committedIndex {
-			rf.lastApplied++
-			rf.applyCh <- ApplyMsg{
-				CommandValid: true,
-				Command:      rf.logs[rf.lastApplied].Command,
-				CommandIndex: rf.lastApplied,
-			}
-			rf.debug("Server %d applied log (index: %d).\n", rf.me, rf.lastApplied)
+		rf.lastApplied++
+		msg := ApplyMsg{
+			CommandValid: true,
+			Command:      rf.logs[rf.lastApplied].Command,
+			CommandIndex: rf.lastApplied,
 		}
+		select {
+		case rf.applyCh <- msg:
+			rf.debug("Server %d applied log (index: %d).\n", rf.me, rf.lastApplied)
+		default:
+		}
+		// for rf.lastApplied < rf.committedIndex {
+		// 	rf.lastApplied++
+		// 	rf.applyCh <- ApplyMsg{
+		// 		CommandValid: true,
+		// 		Command:      rf.logs[rf.lastApplied].Command,
+		// 		CommandIndex: rf.lastApplied,
+		// 	}
+		// 	rf.debug("Server %d applied log (index: %d).\n", rf.me, rf.lastApplied)
+		// }
 		rf.cond.L.Unlock()
 	}
 }
