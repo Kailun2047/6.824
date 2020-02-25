@@ -3,27 +3,18 @@ package raftkv
 import (
 	"labgob"
 	"labrpc"
-	"log"
 	"raft"
 	"sync"
 )
-
-const Debug = 0
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
-}
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Type  string
-	Key   string
-	Value string
+	Type      string
+	Key       string
+	Value     string
+	CommandID string
 }
 
 type KVServer struct {
@@ -35,46 +26,79 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	executed map[int]string // Record executed command numbers.
-	pairs    map[string]string
-	cond     *sync.Cond
+	executed    map[string]struct{} // Record executed command numbers.
+	pairs       map[string]string
+	cond        *sync.Cond
+	applied     map[int]chan string
+	enableDebug bool
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	if result, ok := kv.executed[args.CommandNumber]; ok {
-		reply = &GetReply{
-			WrongLeader: false,
-			Err:         "",
-			Value:       result,
-		}
-		return
-	}
-	_, _, isLeader := kv.rf.Start(Op{
-		Type:  "Get",
-		Key:   args.Key,
-		Value: "",
+	index, _, isLeader := kv.rf.Start(Op{
+		Type:      "Get",
+		Key:       args.Key,
+		Value:     "",
+		CommandID: args.CommandID,
 	})
 	if !isLeader {
 		reply.WrongLeader = true
+		kv.mu.Unlock()
 		return
 	}
-	kv.cond.Wait()
-	val, _ := kv.pairs[args.Key]
-	reply = &GetReply{
-		WrongLeader: false,
-		Err:         "",
-		Value:       val,
+	if _, ok := kv.applied[index]; !ok {
+		kv.applied[index] = make(chan string)
 	}
-	return
+	kv.mu.Unlock()
+	commandID := <-kv.applied[index]
+	if commandID != args.CommandID {
+		reply.Err = "Leadership changed before commit"
+		reply.WrongLeader = true
+		return
+	}
+	reply.WrongLeader = false
+	kv.mu.Lock()
+	reply.Value = kv.pairs[args.Key]
+	kv.mu.Unlock()
 }
 
 // TODO: add long-term goroutine to read applyCh.
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	if _, ok := kv.executed[args.CommandID]; ok {
+		reply.Err = ""
+		reply.WrongLeader = false
+		kv.mu.Unlock()
+		return
+	}
+	index, _, isLeader := kv.rf.Start(Op{
+		Type:      args.Op,
+		Key:       args.Key,
+		Value:     args.Value,
+		CommandID: args.CommandID,
+	})
+	if !isLeader {
+		reply.WrongLeader = true
+		kv.mu.Unlock()
+		return
+	}
+	if _, ok := kv.applied[index]; !ok {
+		kv.applied[index] = make(chan string)
+	}
+	kv.mu.Unlock()
+	commandID := <-kv.applied[index]
+	if commandID != args.CommandID {
+		reply.Err = "Leadership changed before commit"
+		reply.WrongLeader = true
+		return
+	}
+	reply.WrongLeader = false
+	kv.mu.Lock()
+	kv.executed[commandID] = struct{}{}
+	kv.mu.Unlock()
 }
 
 //
@@ -112,14 +136,37 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-	kv.executed = make(map[int]string)
+	kv.executed = make(map[string]struct{})
 	kv.pairs = make(map[string]string)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.cond = sync.NewCond(&kv.mu)
+	kv.applied = make(map[int]chan string)
+	kv.enableDebug = false
+	go readAppliedCommand(kv)
 
 	return kv
+}
+
+func readAppliedCommand(kv *KVServer) {
+	for {
+		applyMsg := <-kv.applyCh
+		if applyMsg.CommandValid {
+			op := applyMsg.Command.(Op)
+			kv.mu.Lock()
+			switch op.Type {
+			case "Put":
+				kv.pairs[op.Key] = op.Value
+			case "Append":
+				kv.pairs[op.Key] = kv.pairs[op.Key] + op.Value
+			}
+			_, isLeader := kv.rf.GetState()
+			if isLeader {
+				kv.applied[applyMsg.CommandIndex] <- op.CommandID
+			}
+			kv.mu.Unlock()
+		}
+	}
 }

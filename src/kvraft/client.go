@@ -3,13 +3,15 @@ package raftkv
 import (
 	"crypto/rand"
 	"labrpc"
+	"log"
 	"math/big"
-	"time"
+	"strconv"
 )
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	clerkID       int64
 	commandNumber int // Serial number for current command.
 	leaderID      int
 }
@@ -25,9 +27,16 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.clerkID = nrand()
 	ck.commandNumber = 0
 	ck.leaderID = -1
 	return ck
+}
+
+func (ck *Clerk) generateCommandID() string {
+	commandID := strconv.FormatInt(ck.clerkID, 10) + "+" + strconv.Itoa(ck.commandNumber)
+	ck.clerkID++
+	return commandID
 }
 
 //
@@ -46,29 +55,32 @@ func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
 	args := GetArgs{
-		Key:           key,
-		CommandNumber: ck.commandNumber,
+		Key:       key,
+		CommandID: ck.generateCommandID(),
 	}
-	var reply GetReply
+	res := ""
 	i := ck.leaderID
 	if i == -1 {
-		i = int(nrand() % int64(len(ck.servers)))
+		i = 0
 	}
-	replyReady := false
-	for replyReady {
+	for {
+		var reply GetReply
 		ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
 		if ok {
 			if reply.WrongLeader {
 				i = (i + 1) % len(ck.servers)
 				continue
 			}
-			if reply.Value == "" && reply.Err == "" || len(reply.Value) > 0 {
-				replyReady = true
+			ck.leaderID = i
+			if len(reply.Err) > 0 {
+				log.Println(reply.Err)
+				continue
 			}
+			res = reply.Value
+			break
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
-	return reply.Value
+	return res
 }
 
 //
@@ -83,6 +95,32 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	args := PutAppendArgs{
+		Key:       key,
+		Value:     value,
+		Op:        op,
+		CommandID: ck.generateCommandID(),
+	}
+	i := ck.leaderID
+	if i == -1 {
+		i = 0
+	}
+	for {
+		var reply PutAppendReply
+		ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
+		if ok {
+			if reply.WrongLeader {
+				i = (i + 1) % len(ck.servers)
+				continue
+			}
+			ck.leaderID = i
+			if len(reply.Err) > 0 {
+				log.Println(reply.Err)
+				continue
+			}
+			break
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
