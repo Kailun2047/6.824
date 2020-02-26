@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/big"
 	"strconv"
+	"time"
 )
 
 type Clerk struct {
@@ -78,7 +79,10 @@ func (ck *Clerk) Get(key string) string {
 			}
 			res = reply.Value
 			break
+		} else {
+			i = (i + 1) % len(ck.servers)
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	return res
 }
@@ -119,7 +123,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				continue
 			}
 			break
+		} else {
+			i = (i + 1) % len(ck.servers)
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
