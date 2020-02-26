@@ -162,11 +162,10 @@ func readAppliedCommand(kv *KVServer) {
 			case "Append":
 				kv.pairs[op.Key] = kv.pairs[op.Key] + op.Value
 			}
-			_, isLeader := kv.rf.GetState()
-			if isLeader {
-				kv.applied[applyMsg.CommandIndex] <- op.CommandID
-			}
 			kv.mu.Unlock()
+			if ch, ok := kv.applied[applyMsg.CommandIndex]; ok {
+				ch <- op.CommandID
+			}
 		}
 	}
 }
