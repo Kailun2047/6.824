@@ -15,6 +15,7 @@ type Clerk struct {
 	clerkID       int64
 	commandNumber int // Serial number for current command.
 	leaderID      int
+	enableDebug   bool
 }
 
 func nrand() int64 {
@@ -31,6 +32,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.clerkID = nrand()
 	ck.commandNumber = 0
 	ck.leaderID = -1
+	ck.enableDebug = true
 	return ck
 }
 
@@ -78,9 +80,11 @@ func (ck *Clerk) Get(key string) string {
 				continue
 			}
 			res = reply.Value
+			ck.debug("Client receives Get reply from server %d\n", i)
 			break
 		} else {
 			i = (i + 1) % len(ck.servers)
+			ck.debug("Get RPC times out, client retries with server %d\n", i)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -122,9 +126,11 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				log.Println(reply.Err)
 				continue
 			}
+			ck.debug("Client receives PutAppend reply from server %d\n", i)
 			break
 		} else {
 			i = (i + 1) % len(ck.servers)
+			ck.debug("PutAppend RPC times out, client retries with server %d\n", i)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -135,4 +141,10 @@ func (ck *Clerk) Put(key string, value string) {
 }
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
+}
+
+func (ck *Clerk) debug(s string, a ...interface{}) {
+	if ck.enableDebug {
+		log.Printf(s, a...)
+	}
 }

@@ -3,8 +3,10 @@ package raftkv
 import (
 	"labgob"
 	"labrpc"
+	"log"
 	"raft"
 	"sync"
+	"time"
 )
 
 type Op struct {
@@ -50,10 +52,28 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	if _, ok := kv.applied[index]; !ok {
 		kv.applied[index] = make(chan string)
 	}
+	leaderCh := make(chan struct{})
+	// TODO: fix goroutine leak.
+	go func(kvs *KVServer) {
+		for {
+			time.Sleep(10 * time.Millisecond)
+			_, isStillLeader := kvs.rf.GetState()
+			if !isStillLeader {
+				leaderCh <- struct{}{}
+				return
+			}
+		}
+	}(kv)
 	kv.mu.Unlock()
-	commandID := <-kv.applied[index]
-	if commandID != args.CommandID {
-		reply.Err = "Leadership changed before commit"
+	select {
+	case commandID := <-kv.applied[index]:
+		if commandID != args.CommandID {
+			reply.Err = "Leadership changed before commit (new leader applied new command)"
+			reply.WrongLeader = true
+			return
+		}
+	case <-leaderCh:
+		reply.Err = "Leadership changed before commit (no new command applied)"
 		reply.WrongLeader = true
 		return
 	}
@@ -62,8 +82,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	reply.Value = kv.pairs[args.Key]
 	kv.mu.Unlock()
 }
-
-// TODO: add long-term goroutine to read applyCh.
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
@@ -88,17 +106,32 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	if _, ok := kv.applied[index]; !ok {
 		kv.applied[index] = make(chan string)
 	}
+	leaderCh := make(chan struct{})
+	// TODO: fix goroutine leak.
+	go func(kvs *KVServer) {
+		for {
+			time.Sleep(10 * time.Millisecond)
+			_, isStillLeader := kvs.rf.GetState()
+			if !isStillLeader {
+				leaderCh <- struct{}{}
+				return
+			}
+		}
+	}(kv)
 	kv.mu.Unlock()
-	commandID := <-kv.applied[index]
-	if commandID != args.CommandID {
-		reply.Err = "Leadership changed before commit"
+	select {
+	case commandID := <-kv.applied[index]:
+		if commandID != args.CommandID {
+			reply.Err = "Leadership changed before commit (new leader applied new command)"
+			reply.WrongLeader = true
+			return
+		}
+	case <-leaderCh:
+		reply.Err = "Leadership changed before commit (no new command applied)"
 		reply.WrongLeader = true
 		return
 	}
 	reply.WrongLeader = false
-	kv.mu.Lock()
-	kv.executed[commandID] = struct{}{}
-	kv.mu.Unlock()
 }
 
 //
@@ -156,12 +189,18 @@ func readAppliedCommand(kv *KVServer) {
 		if applyMsg.CommandValid {
 			op := applyMsg.Command.(Op)
 			kv.mu.Lock()
+			if _, ok := kv.executed[op.CommandID]; ok {
+				kv.mu.Unlock()
+				continue
+			}
 			switch op.Type {
 			case "Put":
 				kv.pairs[op.Key] = op.Value
 			case "Append":
 				kv.pairs[op.Key] = kv.pairs[op.Key] + op.Value
+				log.Printf("Current value of key %s on server %d: %s\n", op.Key, kv.me, kv.pairs[op.Key])
 			}
+			kv.executed[op.CommandID] = struct{}{}
 			kv.mu.Unlock()
 			if ch, ok := kv.applied[applyMsg.CommandIndex]; ok {
 				ch <- op.CommandID
