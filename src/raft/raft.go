@@ -465,7 +465,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.role = Follower
 	rf.alive = true
-	rf.enableDebug = false
+	rf.enableDebug = true
 	rf.timeoutValue = MinElectionTimeout + rand.Intn(MinElectionTimeout/2)
 	rf.timeoutRemain = rf.timeoutValue
 	go checkElectionTimeout(rf)
@@ -614,14 +614,15 @@ func applyEntries(rf *Raft) {
 		for rf.lastApplied == rf.committedIndex {
 			rf.cond.Wait()
 		}
-		rf.lastApplied++
+		commandIndex := rf.lastApplied + 1
 		msg := ApplyMsg{
 			CommandValid: true,
-			Command:      rf.logs[rf.lastApplied].Command,
-			CommandIndex: rf.lastApplied,
+			Command:      rf.logs[commandIndex].Command,
+			CommandIndex: commandIndex,
 		}
 		select {
 		case rf.applyCh <- msg:
+			rf.lastApplied++
 			rf.debug("Server %d applied log (index: %d).\n", rf.me, rf.lastApplied)
 		default:
 		}
