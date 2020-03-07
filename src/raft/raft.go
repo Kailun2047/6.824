@@ -90,6 +90,7 @@ type Raft struct {
 	enableDebug    bool          // For Debugging.
 	applyCh        chan ApplyMsg // For server to apply new entries.
 	cond           *sync.Cond    // To kick the apply entries gorontine.
+	muCond         sync.Mutex
 }
 
 // return currentTerm and whether this server
@@ -348,7 +349,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.role == Leader {
-		rf.debug("Leader %d starts agreement on command %v.\n", rf.me, command)
 		rf.logs = append(rf.logs, LogEntry{
 			Term:    rf.term,
 			Command: command,
@@ -358,6 +358,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = len(rf.logs) - 1
 		isLeader = true
 		rf.matchIndex[rf.me] = index
+		rf.debug("Leader %d starts agreement on command %v (index: %d).\n", rf.me, command, index)
 		rf.appendNewEntries()
 	}
 
@@ -368,7 +369,11 @@ func (rf *Raft) appendNewEntries() {
 	// Make a copy of leader states to avoid inconsistency.
 	for peerID := range rf.peers {
 		if peerID != rf.me {
-			prevLogIndex := min(rf.nextIndex[peerID]-1, len(rf.logs)-1)
+			// It's possible that a leader and a follower are partitioned
+			// into a minority, and when this leader is reconnected to majority
+			// some logs are discarded and therefore nextIndex[peerID] > len(rf.logs).
+			rf.nextIndex[peerID] = min(rf.nextIndex[peerID], len(rf.logs))
+			prevLogIndex := rf.nextIndex[peerID] - 1
 			prevLogTerm := 0
 			if prevLogIndex > 0 {
 				prevLogTerm = rf.logs[prevLogIndex].Term
@@ -378,7 +383,7 @@ func (rf *Raft) appendNewEntries() {
 				LeaderID:     rf.me,
 				PrevLogIndex: prevLogIndex,
 				PrevLogTerm:  prevLogTerm,
-				Entries:      rf.logs[(prevLogIndex + 1):],
+				Entries:      rf.logs[rf.nextIndex[peerID]:],
 				LeaderCommit: rf.committedIndex,
 			}
 			go tryAppend(rf, peerID, args)
@@ -461,11 +466,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.logs = make([]LogEntry, 1)
 	rf.applyCh = applyCh
-	rf.cond = sync.NewCond(&rf.mu)
+	rf.cond = sync.NewCond(&rf.muCond)
 	rf.votedFor = -1
 	rf.role = Follower
 	rf.alive = true
-	rf.enableDebug = true
+	rf.enableDebug = false
 	rf.timeoutValue = MinElectionTimeout + rand.Intn(MinElectionTimeout/2)
 	rf.timeoutRemain = rf.timeoutValue
 	go checkElectionTimeout(rf)
@@ -488,15 +493,13 @@ func checkElectionTimeout(rf *Raft) {
 			rf.votedFor = -1
 			rf.debug("Server %d elected as new leader\n", rf.me)
 			// When a server first comes to power, initialize nextIndex[] and matchIndex[].
-			if rf.nextIndex == nil {
-				rf.nextIndex = make([]int, len(rf.peers))
-				rf.matchIndex = make([]int, len(rf.peers))
-				// Conservatively set matchIndex to 0 (not sharing anything),
-				// optimistically set nextIndex to len(rf.logs).
-				for i := range rf.matchIndex {
-					rf.matchIndex[i] = 0
-					rf.nextIndex[i] = len(rf.logs)
-				}
+			rf.nextIndex = make([]int, len(rf.peers))
+			rf.matchIndex = make([]int, len(rf.peers))
+			// Conservatively set matchIndex to 0 (not sharing anything),
+			// optimistically set nextIndex to len(rf.logs).
+			for i := range rf.matchIndex {
+				rf.matchIndex[i] = 0
+				rf.nextIndex[i] = len(rf.logs)
 			}
 			rf.appendNewEntries()
 			rf.mu.Unlock()
@@ -597,7 +600,8 @@ func checkApplyEntries(rf *Raft) {
 					}
 				}
 			}
-			if newCommittedIndex > rf.committedIndex {
+			// Leader can only commit logs whose term is the current term.
+			if newCommittedIndex > rf.committedIndex && rf.committedIndex < len(rf.logs) && rf.logs[newCommittedIndex].Term == rf.term {
 				rf.committedIndex = newCommittedIndex
 				rf.debug("Leader %d updated committedIndex to %d.\n", rf.me, rf.committedIndex)
 				rf.cond.Broadcast()
@@ -609,7 +613,6 @@ func checkApplyEntries(rf *Raft) {
 
 func applyEntries(rf *Raft) {
 	for {
-		time.Sleep(10 * time.Millisecond)
 		rf.cond.L.Lock()
 		for rf.lastApplied == rf.committedIndex {
 			rf.cond.Wait()
@@ -623,18 +626,9 @@ func applyEntries(rf *Raft) {
 		select {
 		case rf.applyCh <- msg:
 			rf.lastApplied++
-			rf.debug("Server %d applied log (index: %d).\n", rf.me, rf.lastApplied)
+			rf.debug("Server %d applied log %v (index: %d)\n", rf.me, msg, commandIndex)
 		default:
 		}
-		// for rf.lastApplied < rf.committedIndex {
-		// 	rf.lastApplied++
-		// 	rf.applyCh <- ApplyMsg{
-		// 		CommandValid: true,
-		// 		Command:      rf.logs[rf.lastApplied].Command,
-		// 		CommandIndex: rf.lastApplied,
-		// 	}
-		// 	rf.debug("Server %d applied log (index: %d).\n", rf.me, rf.lastApplied)
-		// }
 		rf.cond.L.Unlock()
 	}
 }
