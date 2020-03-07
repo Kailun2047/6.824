@@ -308,7 +308,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// min() is necessary since LeaderCommit could be beyond
 		// the up-to-date entries on this follower.
 		rf.committedIndex = min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
+		rf.cond.L.Lock()
 		rf.cond.Broadcast()
+		rf.cond.L.Unlock()
 	}
 	reply.Success = true
 }
@@ -604,7 +606,9 @@ func checkApplyEntries(rf *Raft) {
 			if newCommittedIndex > rf.committedIndex && rf.committedIndex < len(rf.logs) && rf.logs[newCommittedIndex].Term == rf.term {
 				rf.committedIndex = newCommittedIndex
 				rf.debug("Leader %d updated committedIndex to %d.\n", rf.me, rf.committedIndex)
+				rf.cond.L.Lock()
 				rf.cond.Broadcast()
+				rf.cond.L.Unlock()
 			}
 		}
 		rf.mu.Unlock()
@@ -612,8 +616,8 @@ func checkApplyEntries(rf *Raft) {
 }
 
 func applyEntries(rf *Raft) {
+	rf.cond.L.Lock()
 	for {
-		rf.cond.L.Lock()
 		for rf.lastApplied == rf.committedIndex {
 			rf.cond.Wait()
 		}
@@ -623,13 +627,9 @@ func applyEntries(rf *Raft) {
 			Command:      rf.logs[commandIndex].Command,
 			CommandIndex: commandIndex,
 		}
-		select {
-		case rf.applyCh <- msg:
-			rf.lastApplied++
-			rf.debug("Server %d applied log %v (index: %d)\n", rf.me, msg, commandIndex)
-		default:
-		}
-		rf.cond.L.Unlock()
+		rf.applyCh <- msg
+		rf.lastApplied++
+		rf.debug("Server %d applied log %v (index: %d)\n", rf.me, msg, commandIndex)
 	}
 }
 
