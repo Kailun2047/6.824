@@ -49,31 +49,20 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Unlock()
 		return
 	}
+	if _, ok := kv.executed[args.CommandID]; ok {
+		reply.Err = ""
+		reply.WrongLeader = false
+		reply.Value = kv.pairs[args.Key]
+		kv.mu.Unlock()
+		return
+	}
 	if _, ok := kv.applied[index]; !ok {
 		kv.applied[index] = make(chan string)
 	}
-	leaderCh := make(chan struct{})
-	// TODO: fix goroutine leak.
-	go func(kvs *KVServer) {
-		for {
-			time.Sleep(10 * time.Millisecond)
-			_, isStillLeader := kvs.rf.GetState()
-			if !isStillLeader {
-				leaderCh <- struct{}{}
-				return
-			}
-		}
-	}(kv)
 	kv.mu.Unlock()
-	select {
-	case commandID := <-kv.applied[index]:
-		if commandID != args.CommandID {
-			reply.Err = "Leadership changed before commit (new leader applied new command)"
-			reply.WrongLeader = true
-			return
-		}
-	case <-leaderCh:
-		reply.Err = "Leadership changed before commit (no new command applied)"
+	commandID := <-kv.applied[index]
+	if commandID != args.CommandID {
+		reply.Err = "Leadership changed before commit (new leader applied new command)"
 		reply.WrongLeader = true
 		return
 	}
@@ -86,12 +75,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	kv.mu.Lock()
-	if _, ok := kv.executed[args.CommandID]; ok {
-		reply.Err = ""
-		reply.WrongLeader = false
-		kv.mu.Unlock()
-		return
-	}
 	index, _, isLeader := kv.rf.Start(Op{
 		Type:      args.Op,
 		Key:       args.Key,
@@ -103,31 +86,19 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Unlock()
 		return
 	}
+	if _, ok := kv.executed[args.CommandID]; ok {
+		reply.Err = ""
+		reply.WrongLeader = false
+		kv.mu.Unlock()
+		return
+	}
 	if _, ok := kv.applied[index]; !ok {
 		kv.applied[index] = make(chan string)
 	}
-	leaderCh := make(chan struct{})
-	// TODO: fix goroutine leak.
-	go func(kvs *KVServer) {
-		for {
-			time.Sleep(10 * time.Millisecond)
-			_, isStillLeader := kvs.rf.GetState()
-			if !isStillLeader {
-				leaderCh <- struct{}{}
-				return
-			}
-		}
-	}(kv)
 	kv.mu.Unlock()
-	select {
-	case commandID := <-kv.applied[index]:
-		if commandID != args.CommandID {
-			reply.Err = "Leadership changed before commit (new leader applied new command)"
-			reply.WrongLeader = true
-			return
-		}
-	case <-leaderCh:
-		reply.Err = "Leadership changed before commit (no new command applied)"
+	commandID := <-kv.applied[index]
+	if commandID != args.CommandID {
+		reply.Err = "Leadership changed before commit (new leader applied new command)"
 		reply.WrongLeader = true
 		return
 	}
@@ -185,26 +156,31 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 func readAppliedCommand(kv *KVServer) {
 	for {
+		time.Sleep(10 * time.Millisecond)
 		applyMsg := <-kv.applyCh
 		if applyMsg.CommandValid {
 			op := applyMsg.Command.(Op)
 			kv.mu.Lock()
-			if _, ok := kv.executed[op.CommandID]; ok {
-				kv.mu.Unlock()
-				continue
+			kv.debug("Lock obtained for applyMsg %v on server %d\n", applyMsg, kv.me)
+			if _, ok := kv.executed[op.CommandID]; !ok {
+				switch op.Type {
+				case "Put":
+					kv.pairs[op.Key] = op.Value
+				case "Append":
+					kv.pairs[op.Key] = kv.pairs[op.Key] + op.Value
+				}
+				kv.executed[op.CommandID] = struct{}{}
 			}
-			switch op.Type {
-			case "Put":
-				kv.pairs[op.Key] = op.Value
-			case "Append":
-				kv.pairs[op.Key] = kv.pairs[op.Key] + op.Value
-				log.Printf("Current value of key %s on server %d: %s\n", op.Key, kv.me, kv.pairs[op.Key])
-			}
-			kv.executed[op.CommandID] = struct{}{}
 			kv.mu.Unlock()
 			if ch, ok := kv.applied[applyMsg.CommandIndex]; ok {
 				ch <- op.CommandID
 			}
 		}
+	}
+}
+
+func (kv *KVServer) debug(s string, a ...interface{}) {
+	if kv.enableDebug {
+		log.Printf(s, a...)
 	}
 }

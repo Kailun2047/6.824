@@ -32,13 +32,13 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.clerkID = nrand()
 	ck.commandNumber = 0
 	ck.leaderID = -1
-	ck.enableDebug = true
+	ck.enableDebug = false
 	return ck
 }
 
 func (ck *Clerk) generateCommandID() string {
 	commandID := strconv.FormatInt(ck.clerkID, 10) + "+" + strconv.Itoa(ck.commandNumber)
-	ck.clerkID++
+	ck.commandNumber++
 	return commandID
 }
 
@@ -66,27 +66,25 @@ func (ck *Clerk) Get(key string) string {
 	if i == -1 {
 		i = 0
 	}
+	doneCh := make(chan bool)
 	for {
 		var reply GetReply
-		ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
-		if ok {
-			if reply.WrongLeader {
-				i = (i + 1) % len(ck.servers)
-				continue
+		go func() {
+			ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
+			doneCh <- ok
+		}()
+		select {
+		case <-time.After(600 * time.Millisecond):
+			ck.debug("No reply in 600 ms, clerk %d retry request %v\n", ck.clerkID, args)
+		case ok := <-doneCh:
+			if ok && !reply.WrongLeader && len(reply.Err) == 0 {
+				ck.leaderID = i
+				res = reply.Value
+				ck.debug("Client receives reply from server %d for Get request %v\n", i, args)
+				return res
 			}
-			ck.leaderID = i
-			if len(reply.Err) > 0 {
-				log.Println(reply.Err)
-				continue
-			}
-			res = reply.Value
-			ck.debug("Client receives Get reply from server %d\n", i)
-			break
-		} else {
-			i = (i + 1) % len(ck.servers)
-			ck.debug("Get RPC times out, client retries with server %d\n", i)
 		}
-		time.Sleep(10 * time.Millisecond)
+		i = (i + 1) % len(ck.servers)
 	}
 	return res
 }
@@ -113,26 +111,24 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	if i == -1 {
 		i = 0
 	}
+	doneCh := make(chan bool)
 	for {
 		var reply PutAppendReply
-		ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
-		if ok {
-			if reply.WrongLeader {
-				i = (i + 1) % len(ck.servers)
-				continue
+		go func() {
+			ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
+			doneCh <- ok
+		}()
+		select {
+		case <-time.After(600 * time.Millisecond):
+			ck.debug("No reply in 600 ms, clerk %d retry request %v\n", ck.clerkID, args)
+		case ok := <-doneCh:
+			if ok && !reply.WrongLeader && len(reply.Err) == 0 {
+				ck.leaderID = i
+				ck.debug("Client receives reply from server %d for PutAppend request %v\n", i, args)
+				return
 			}
-			ck.leaderID = i
-			if len(reply.Err) > 0 {
-				log.Println(reply.Err)
-				continue
-			}
-			ck.debug("Client receives PutAppend reply from server %d\n", i)
-			break
-		} else {
-			i = (i + 1) % len(ck.servers)
-			ck.debug("PutAppend RPC times out, client retries with server %d\n", i)
 		}
-		time.Sleep(10 * time.Millisecond)
+		i = (i + 1) % len(ck.servers)
 	}
 }
 
