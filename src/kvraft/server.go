@@ -101,7 +101,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	commandID := <-kv.applied[index]
 	if commandID != args.CommandID {
 		reply.Err = "Leadership changed before commit (new leader applied new command)"
-		log.Printf("%v: %s\n", *args, reply.Err)
 		reply.WrongLeader = true
 		return
 	}
