@@ -82,7 +82,7 @@ Loop:
 		case rep := <-doneCh:
 			if !rep.WrongLeader && len(rep.Err) == 0 {
 				ck.leaderID = i
-				res = reply.Value
+				res = rep.Value
 				ck.debug("Client receives reply from server %d for Get request %v\n", i, args)
 				break Loop
 			}
