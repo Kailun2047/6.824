@@ -49,6 +49,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Unlock()
 		return
 	}
+	kv.debug("Leader %d receives Get request %v\n", kv.me, *args)
 	if _, ok := kv.executed[args.CommandID]; ok {
 		reply.Err = ""
 		reply.WrongLeader = false
@@ -86,6 +87,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Unlock()
 		return
 	}
+	kv.debug("Leader %d receives PutAppend request %v\n", kv.me, *args)
 	if _, ok := kv.executed[args.CommandID]; ok {
 		reply.Err = ""
 		reply.WrongLeader = false
@@ -99,6 +101,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	commandID := <-kv.applied[index]
 	if commandID != args.CommandID {
 		reply.Err = "Leadership changed before commit (new leader applied new command)"
+		log.Printf("%v: %s\n", *args, reply.Err)
 		reply.WrongLeader = true
 		return
 	}
@@ -161,7 +164,6 @@ func readAppliedCommand(kv *KVServer) {
 		if applyMsg.CommandValid {
 			op := applyMsg.Command.(Op)
 			kv.mu.Lock()
-			kv.debug("Lock obtained for applyMsg %v on server %d\n", applyMsg, kv.me)
 			if _, ok := kv.executed[op.CommandID]; !ok {
 				switch op.Type {
 				case "Put":

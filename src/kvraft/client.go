@@ -66,22 +66,25 @@ func (ck *Clerk) Get(key string) string {
 	if i == -1 {
 		i = 0
 	}
-	doneCh := make(chan bool)
+	doneCh := make(chan *GetReply)
+Loop:
 	for {
 		var reply GetReply
-		go func() {
-			ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
-			doneCh <- ok
-		}()
+		go func(serverID int, argsPtr *GetArgs, replyPtr *GetReply) {
+			ok := ck.servers[serverID].Call("KVServer.Get", argsPtr, replyPtr)
+			if ok {
+				doneCh <- replyPtr
+			}
+		}(i, &args, &reply)
 		select {
 		case <-time.After(600 * time.Millisecond):
 			ck.debug("No reply in 600 ms, clerk %d retry request %v\n", ck.clerkID, args)
-		case ok := <-doneCh:
-			if ok && !reply.WrongLeader && len(reply.Err) == 0 {
+		case rep := <-doneCh:
+			if !rep.WrongLeader && len(rep.Err) == 0 {
 				ck.leaderID = i
 				res = reply.Value
 				ck.debug("Client receives reply from server %d for Get request %v\n", i, args)
-				return res
+				break Loop
 			}
 		}
 		i = (i + 1) % len(ck.servers)
@@ -111,18 +114,20 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	if i == -1 {
 		i = 0
 	}
-	doneCh := make(chan bool)
+	doneCh := make(chan *PutAppendReply)
 	for {
 		var reply PutAppendReply
-		go func() {
-			ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
-			doneCh <- ok
-		}()
+		go func(serverID int, argsPtr *PutAppendArgs, replyPtr *PutAppendReply) {
+			ok := ck.servers[serverID].Call("KVServer.PutAppend", argsPtr, replyPtr)
+			if ok {
+				doneCh <- replyPtr
+			}
+		}(i, &args, &reply)
 		select {
 		case <-time.After(600 * time.Millisecond):
 			ck.debug("No reply in 600 ms, clerk %d retry request %v\n", ck.clerkID, args)
-		case ok := <-doneCh:
-			if ok && !reply.WrongLeader && len(reply.Err) == 0 {
+		case rep := <-doneCh:
+			if !rep.WrongLeader && len(rep.Err) == 0 {
 				ck.leaderID = i
 				ck.debug("Client receives reply from server %d for PutAppend request %v\n", i, args)
 				return
