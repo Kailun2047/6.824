@@ -79,6 +79,7 @@ type Raft struct {
 	votedFor       int
 	term           int
 	logs           []LogEntry
+	startIndex     int // Index of first log entry.
 	committedIndex int
 	lastApplied    int
 	nextIndex      []int
@@ -176,7 +177,7 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	rf.debug("Server %d (index: %d, term: %d) receives RequestVote RPC from candidate %d (index: %d, term: %d)\n", rf.me, len(rf.logs)-1, rf.term, args.CandidateId, args.LastLogIndex, args.Term)
+	rf.debug("Server %d (index: %d, term: %d) receives RequestVote RPC from candidate %d (index: %d, term: %d)\n", rf.me, rf.startIndex+len(rf.logs)-1, rf.term, args.CandidateId, args.LastLogIndex, args.Term)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.term
@@ -196,7 +197,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		lastLog = rf.logs[len(rf.logs)-1]
 	}
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-		(args.LastLogTerm > lastLog.Term || args.LastLogTerm == lastLog.Term && args.LastLogIndex >= len(rf.logs)-1) {
+		(args.LastLogTerm > lastLog.Term || args.LastLogTerm == lastLog.Term && args.LastLogIndex >= rf.startIndex+len(rf.logs)-1) {
 		rf.votedFor = args.CandidateId
 		rf.persist()
 		rf.timeoutRemain = rf.timeoutValue
@@ -261,7 +262,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.debug("Follower %d (index: %d, term: %d) receives AppendEntries RPC from leader %d (PrevLogIndex: %d, term: %d)\n", rf.me, len(rf.logs)-1, rf.term, args.LeaderID, args.PrevLogIndex, args.Term)
+	rf.debug("Follower %d (index: %d, term: %d) receives AppendEntries RPC from leader %d (PrevLogIndex: %d, term: %d)\n", rf.me, rf.startIndex+len(rf.logs)-1, rf.term, args.LeaderID, args.PrevLogIndex, args.Term)
 	reply.Term = rf.term
 	if args.Term < rf.term {
 		reply.Success = false
@@ -273,14 +274,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	// If term of log at PrevLogIndex doesn't match leader's, return false
 	// so that leader will decrement PrevLogIndex.
-	if len(rf.logs) <= args.PrevLogIndex || args.PrevLogIndex > 0 && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
-		if len(rf.logs) <= args.PrevLogIndex {
-			reply.ConflictingIndex = len(rf.logs)
+	if rf.startIndex+len(rf.logs) <= args.PrevLogIndex || args.PrevLogIndex > 0 && rf.logs[args.PrevLogIndex-rf.startIndex].Term != args.PrevLogTerm {
+		if rf.startIndex+len(rf.logs) <= args.PrevLogIndex {
+			reply.ConflictingIndex = rf.startIndex + len(rf.logs)
 			reply.ConflictingTerm = -1
 		} else {
-			conflictingIndex := len(rf.logs) - 1
-			reply.ConflictingTerm = rf.logs[conflictingIndex].Term
-			for conflictingIndex > 0 && rf.logs[conflictingIndex].Term == reply.ConflictingTerm {
+			conflictingIndex := rf.startIndex + len(rf.logs) - 1
+			reply.ConflictingTerm = rf.logs[conflictingIndex-rf.startIndex].Term
+			for conflictingIndex > rf.startIndex && rf.logs[conflictingIndex-rf.startIndex].Term == reply.ConflictingTerm {
 				conflictingIndex--
 			}
 			reply.ConflictingIndex = conflictingIndex
@@ -288,9 +289,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
+	// Variable conflictIndex is the index where follower's logs[conflictIndex] doesn't conform to args.Entries[i].
 	conflictIndex := 0
 	for i := 0; i < len(args.Entries); i++ {
-		idx := args.PrevLogIndex + 1 + i
+		idx := args.PrevLogIndex + 1 + i - rf.startIndex
 		if idx >= len(rf.logs) || rf.logs[idx].Term != args.Entries[i].Term {
 			conflictIndex = idx
 			break
@@ -299,7 +301,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Truncate old logs and append new logs ONLY IF there is a conflicting entry.
 	if conflictIndex != 0 {
 		rf.logs = rf.logs[:conflictIndex]
-		for i := conflictIndex - args.PrevLogIndex - 1; i < len(args.Entries); i++ {
+		for i := rf.startIndex + conflictIndex - args.PrevLogIndex - 1; i < len(args.Entries); i++ {
 			rf.logs = append(rf.logs, args.Entries[i])
 		}
 		rf.persist()
@@ -355,7 +357,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		})
 		rf.persist()
 		term = rf.term
-		index = len(rf.logs) - 1
+		index = rf.startIndex + len(rf.logs) - 1
 		isLeader = true
 		rf.matchIndex[rf.me] = index
 		rf.debug("Leader %d starts agreement on command %v (index: %d).\n", rf.me, command, index)
@@ -372,7 +374,7 @@ func (rf *Raft) appendNewEntries() {
 			// It's possible that a leader and a follower are partitioned
 			// into a minority, and when this leader is reconnected to majority
 			// some logs are discarded and therefore nextIndex[peerID] > len(rf.logs).
-			rf.nextIndex[peerID] = min(rf.nextIndex[peerID], len(rf.logs))
+			rf.nextIndex[peerID] = min(rf.nextIndex[peerID], rf.startIndex+len(rf.logs))
 			prevLogIndex := rf.nextIndex[peerID] - 1
 			prevLogTerm := 0
 			if prevLogIndex > 0 {
@@ -383,7 +385,7 @@ func (rf *Raft) appendNewEntries() {
 				LeaderID:     rf.me,
 				PrevLogIndex: prevLogIndex,
 				PrevLogTerm:  prevLogTerm,
-				Entries:      rf.logs[rf.nextIndex[peerID]:],
+				Entries:      rf.logs[rf.nextIndex[peerID]-rf.startIndex:],
 				LeaderCommit: rf.committedIndex,
 			}
 			go tryAppend(rf, peerID, args)
@@ -418,17 +420,17 @@ func tryAppend(rf *Raft, peer int, args *AppendEntriesArgs) {
 						for i < len(rf.logs) && rf.logs[i].Term == reply.ConflictingTerm {
 							i++
 						}
-						rf.nextIndex[peer] = i
+						rf.nextIndex[peer] = i + rf.startIndex
 						break
 					}
 				}
 			}
-			args.Entries = rf.logs[rf.nextIndex[peer]:]
+			args.Entries = rf.logs[rf.nextIndex[peer]-rf.startIndex:]
 			args.PrevLogIndex = rf.nextIndex[peer] - 1
-			args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+			args.PrevLogTerm = rf.logs[args.PrevLogIndex-rf.startIndex].Term
 			go tryAppend(rf, peer, args)
 		} else {
-			rf.nextIndex[peer] = len(rf.logs)
+			rf.nextIndex[peer] = len(rf.logs) + rf.startIndex
 			rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
 		}
 	}
@@ -465,6 +467,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.logs = make([]LogEntry, 1)
+	rf.startIndex = 1
 	rf.applyCh = applyCh
 	rf.cond = sync.NewCond(&rf.muCond)
 	rf.votedFor = -1
@@ -499,7 +502,7 @@ func checkElectionTimeout(rf *Raft) {
 			// optimistically set nextIndex to len(rf.logs).
 			for i := range rf.matchIndex {
 				rf.matchIndex[i] = 0
-				rf.nextIndex[i] = len(rf.logs)
+				rf.nextIndex[i] = len(rf.logs) + rf.startIndex
 			}
 			rf.appendNewEntries()
 			rf.mu.Unlock()
@@ -530,9 +533,9 @@ func (rf *Raft) getVotes() {
 	// Pass copies of states to new goroutines to avoid inconsistency.
 	term := rf.term
 	lastLogTerm := 0
-	lastLogIndex := len(rf.logs) - 1
+	lastLogIndex := len(rf.logs) - 1 + rf.startIndex
 	if lastLogIndex > 0 {
-		lastLogTerm = rf.logs[lastLogIndex].Term
+		lastLogTerm = rf.logs[lastLogIndex-rf.startIndex].Term
 	}
 	for peerID := range rf.peers {
 		if peerID != rf.me {
@@ -601,7 +604,7 @@ func checkApplyEntries(rf *Raft) {
 				}
 			}
 			// Leader can only commit logs whose term is the current term.
-			if newCommittedIndex > rf.committedIndex && rf.committedIndex < len(rf.logs) && rf.logs[newCommittedIndex].Term == rf.term {
+			if newCommittedIndex > rf.committedIndex && rf.committedIndex < len(rf.logs)-1+rf.startIndex && rf.logs[newCommittedIndex-rf.startIndex].Term == rf.term {
 				rf.committedIndex = newCommittedIndex
 				rf.debug("Leader %d updated committedIndex to %d.\n", rf.me, rf.committedIndex)
 				rf.cond.Broadcast()
@@ -620,7 +623,7 @@ func applyEntries(rf *Raft) {
 		commandIndex := rf.lastApplied + 1
 		msg := ApplyMsg{
 			CommandValid: true,
-			Command:      rf.logs[commandIndex].Command,
+			Command:      rf.logs[commandIndex-rf.startIndex].Command,
 			CommandIndex: commandIndex,
 		}
 		rf.applyCh <- msg
