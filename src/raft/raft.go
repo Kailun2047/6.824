@@ -44,13 +44,6 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
-type Snapshot struct {
-	LastIndex int
-	LastTerm  int
-	Pairs     map[string]string
-	Executed  map[string]struct{}
-}
-
 // Log entry type.
 type LogEntry struct {
 	Term    int
@@ -99,8 +92,6 @@ type Raft struct {
 	applyCh        chan ApplyMsg // For server to apply new entries.
 	cond           *sync.Cond    // To kick the apply entries gorontine.
 	muCond         sync.Mutex
-	// For snapshotting.
-	snapshot Snapshot
 }
 
 // return currentTerm and whether this server
@@ -114,33 +105,6 @@ func (rf *Raft) GetState() (int, bool) {
 	term = rf.term
 	isleader = rf.role == Leader
 	return term, isleader
-}
-
-// Return startIndex and committedIndex for snapshot checking.
-func (rf *Raft) GetLogInfo() (int, int, int) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	logSize := len(rf.logs)
-	lastIndex := rf.lastApplied
-	lastTerm := rf.logs[lastIndex-rf.startIndex].Term
-	return logSize, lastIndex, lastTerm
-}
-
-// Apply snapshot got from KVServer and discard logs.
-func (rf *Raft) UseSnapshot(snp Snapshot) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if rf.snapshot.LastIndex >= snp.LastIndex {
-		return
-	}
-	rf.snapshot = snp
-	curLastIndex := rf.startIndex + len(rf.logs) - 1
-	if curLastIndex > snp.LastIndex {
-		trimmedLogs := make([]LogEntry, curLastIndex-snp.LastIndex)
-		copy(trimmedLogs, rf.logs[snp.LastIndex-rf.startIndex:])
-		rf.logs = trimmedLogs
-		rf.startIndex = snp.LastIndex + 1
-	}
 }
 
 //
@@ -181,7 +145,6 @@ func (rf *Raft) readPersist(data []byte) {
 	for dec.Decode(&entry) == nil {
 		rf.debug("Server %d recovers a log at index %d.\n", rf.me, len(rf.logs))
 		rf.logs = append(rf.logs, entry)
-		entry = LogEntry{}
 	}
 	rf.term = term
 	rf.votedFor = votedFor
@@ -504,7 +467,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.logs = make([]LogEntry, 1)
-	rf.startIndex = 0
+	rf.startIndex = 1
 	rf.applyCh = applyCh
 	rf.cond = sync.NewCond(&rf.muCond)
 	rf.votedFor = -1

@@ -152,7 +152,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applied = make(map[int]chan string)
 	kv.enableDebug = false
 	go readAppliedCommand(kv)
-	go checkSnapshot(kv)
 
 	return kv
 }
@@ -177,22 +176,6 @@ func readAppliedCommand(kv *KVServer) {
 			if ch, ok := kv.applied[applyMsg.CommandIndex]; ok {
 				ch <- op.CommandID
 			}
-		}
-	}
-}
-
-func checkSnapshot(kv *KVServer) {
-	for {
-		time.Sleep(10 * time.Millisecond)
-		logSize, lastIndex, lastTerm := kv.rf.GetLogInfo()
-		if logSize >= kv.maxraftstate {
-			snp := raft.Snapshot{
-				LastIndex: lastIndex,
-				LastTerm:  lastTerm,
-				Pairs:     kv.pairs,
-				Executed:  kv.executed,
-			}
-			kv.rf.UseSnapshot(snp)
 		}
 	}
 }
