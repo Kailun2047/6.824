@@ -70,6 +70,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	reply.WrongLeader = false
 	kv.mu.Lock()
 	reply.Value = kv.pairs[args.Key]
+	delete(kv.applied, index)
 	kv.mu.Unlock()
 }
 
@@ -99,6 +100,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	kv.mu.Unlock()
 	commandID := <-kv.applied[index]
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	delete(kv.applied, index)
 	if commandID != args.CommandID {
 		reply.Err = "Leadership changed before commit (new leader applied new command)"
 		reply.WrongLeader = true
