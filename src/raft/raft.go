@@ -75,22 +75,29 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+
+	// Persistant states for all servers.
+	votedFor int
+	term     int
+	logs     []LogEntry
+
+	// Volatile states for all servers.
 	role           Role
-	votedFor       int
-	term           int
-	logs           []LogEntry
-	committedIndex int
-	lastApplied    int
-	nextIndex      []int
-	matchIndex     []int
 	votes          int // Count of votes for candidate in current term.
 	timeoutValue   int
 	timeoutRemain  int
-	alive          bool          // For debugging.
-	enableDebug    bool          // For Debugging.
-	applyCh        chan ApplyMsg // For server to apply new entries.
-	cond           *sync.Cond    // To kick the apply entries gorontine.
-	muCond         sync.Mutex
+	committedIndex int
+	lastApplied    int
+
+	// Volatile states for leaders.
+	nextIndex  []int
+	matchIndex []int
+
+	alive       bool          // For debugging.
+	enableDebug bool          // For debugging.
+	applyCh     chan ApplyMsg // For server to apply new entries.
+	cond        *sync.Cond    // To kick the apply entries gorontine.
+	muCond      sync.Mutex
 }
 
 // return currentTerm and whether this server
