@@ -595,7 +595,8 @@ func checkApplyEntries(rf *Raft) {
 		if rf.role == Leader {
 			newCommittedIndex := rf.committedIndex
 			for i := range rf.peers {
-				if rf.matchIndex[i] > newCommittedIndex {
+				// Leader can only commit logs whose term is the current term.
+				if rf.matchIndex[i] > newCommittedIndex && rf.logs[rf.matchIndex[i]].Term == rf.term {
 					count := 0
 					for j := range rf.peers {
 						if rf.matchIndex[j] >= rf.matchIndex[i] {
@@ -607,8 +608,7 @@ func checkApplyEntries(rf *Raft) {
 					}
 				}
 			}
-			// Leader can only commit logs whose term is the current term.
-			if newCommittedIndex > rf.committedIndex && rf.committedIndex < len(rf.logs) && rf.logs[newCommittedIndex].Term == rf.term {
+			if newCommittedIndex > rf.committedIndex {
 				rf.committedIndex = newCommittedIndex
 				rf.debug("Leader %d updated committedIndex to %d.\n", rf.me, rf.committedIndex)
 				rf.cond.Broadcast()
