@@ -625,11 +625,13 @@ func applyEntries(rf *Raft) {
 			rf.cond.Wait()
 		}
 		commandIndex := rf.lastApplied + 1
+		rf.mu.Lock()
 		msg := ApplyMsg{
 			CommandValid: true,
 			Command:      rf.logs[commandIndex].Command,
 			CommandIndex: commandIndex,
 		}
+		rf.mu.Unlock()
 		rf.applyCh <- msg
 		rf.lastApplied++
 		rf.debug("Server %d applied log %v (index: %d)\n", rf.me, msg, commandIndex)
