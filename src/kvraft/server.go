@@ -1,12 +1,19 @@
 package raftkv
 
 import (
+	"bytes"
 	"labgob"
 	"labrpc"
 	"log"
 	"raft"
 	"sync"
 	"time"
+)
+
+const (
+	GetType    = "Get"
+	PutType    = "Put"
+	AppendType = "Append"
 )
 
 type Op struct {
@@ -28,18 +35,20 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	executed    map[string]struct{} // Record executed command numbers.
-	pairs       map[string]string
-	cond        *sync.Cond
-	applied     map[int]chan string
-	enableDebug bool
+	executed         map[string]struct{} // Record executed command numbers.
+	pairs            map[string]string
+	cond             *sync.Cond
+	applied          map[int]chan string
+	enableDebug      bool
+	lastCommandIndex int // Used for snapshotting.
+	snapshottedIndex int // Used for snapshotting.
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
 	index, _, isLeader := kv.rf.Start(Op{
-		Type:      "Get",
+		Type:      GetType,
 		Key:       args.Key,
 		Value:     "",
 		CommandID: args.CommandID,
@@ -69,9 +78,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	reply.WrongLeader = false
 	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	reply.Value = kv.pairs[args.Key]
 	delete(kv.applied, index)
-	kv.mu.Unlock()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -155,7 +164,31 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.applied = make(map[int]chan string)
 	kv.enableDebug = false
+	snapshotBytes := kv.rf.GetSnapshot()
+
+	if len(snapshotBytes) > 0 {
+		buf := bytes.NewBuffer(snapshotBytes)
+		decoder := labgob.NewDecoder(buf)
+		err := decoder.Decode(&kv.lastCommandIndex)
+		kv.snapshottedIndex = kv.lastCommandIndex
+		if err != nil {
+			log.Printf("Error decoding last included index: [%v]\n", err)
+		}
+		var lastIncludedTerm int
+		err = decoder.Decode(&lastIncludedTerm)
+		if err != nil {
+			log.Printf("Error decoding last included term: [%v]\n", err)
+		}
+		err = decoder.Decode(&kv.pairs)
+		if err != nil {
+			log.Printf("Error decoding k-v pairs: [%v]", err)
+		}
+	}
+
 	go readAppliedCommand(kv)
+	if kv.maxraftstate >= 0 {
+		go checkRaftStateSize(kv)
+	}
 
 	return kv
 }
@@ -169,18 +202,31 @@ func readAppliedCommand(kv *KVServer) {
 			kv.mu.Lock()
 			if _, ok := kv.executed[op.CommandID]; !ok {
 				switch op.Type {
-				case "Put":
+				case PutType:
 					kv.pairs[op.Key] = op.Value
-				case "Append":
+				case AppendType:
 					kv.pairs[op.Key] = kv.pairs[op.Key] + op.Value
 				}
 				kv.executed[op.CommandID] = struct{}{}
 			}
+			kv.lastCommandIndex = applyMsg.CommandIndex
 			kv.mu.Unlock()
 			if ch, ok := kv.applied[applyMsg.CommandIndex]; ok {
 				ch <- op.CommandID
 			}
 		}
+	}
+}
+
+func checkRaftStateSize(kv *KVServer) {
+	for {
+		time.Sleep(10 * time.Millisecond)
+		kv.mu.Lock()
+		if kv.rf.GetStateSize() > kv.maxraftstate && kv.lastCommandIndex > kv.snapshottedIndex {
+			kv.rf.CreateSnapshot(kv.pairs, kv.lastCommandIndex)
+			kv.snapshottedIndex = kv.lastCommandIndex
+		}
+		kv.mu.Unlock()
 	}
 }
 
