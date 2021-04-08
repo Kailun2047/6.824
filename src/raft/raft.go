@@ -508,7 +508,7 @@ func tryAppend(rf *Raft, peer int, args *AppendEntriesArgs) {
 			}
 			go tryAppend(rf, peer, args)
 		} else {
-			rf.nextIndex[peer] = rf.logs.StartIndex + len(rf.logs.Entries)
+			rf.nextIndex[peer] = args.PrevLogIndex + len(args.Entries) + 1
 			rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
 		}
 	}
