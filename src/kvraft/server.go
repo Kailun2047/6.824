@@ -6,6 +6,8 @@ import (
 	"labrpc"
 	"log"
 	"raft"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -35,13 +37,26 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	executed         map[string]struct{} // Record executed command numbers.
+	executed         map[int64]int64 // Record largest executed command number for each client.
 	pairs            map[string]string
 	cond             *sync.Cond
 	applied          map[int]chan string
 	enableDebug      bool
 	lastCommandIndex int // Used for snapshotting.
 	snapshottedIndex int // Used for snapshotting.
+}
+
+func parseCommandID(commandID string) (int64, int64) {
+	strs := strings.Split(commandID, "+")
+	clientID, err := strconv.ParseInt(strs[0], 10, 64)
+	if err != nil {
+		log.Fatalf("Cannot parse client ID correctly: [%v]", err)
+	}
+	commandNumber, err := strconv.ParseInt(strs[1], 10, 64)
+	if err != nil {
+		log.Fatalf("Cannot parse command number correctly: [%v]", err)
+	}
+	return clientID, commandNumber
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -59,7 +74,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 	kv.debug("Leader %d receives Get request %v\n", kv.me, *args)
-	if _, ok := kv.executed[args.CommandID]; ok {
+	clientID, commandNumber := parseCommandID(args.CommandID)
+	if commandNumber <= kv.executed[clientID] {
 		reply.Err = ""
 		reply.WrongLeader = false
 		reply.Value = kv.pairs[args.Key]
@@ -98,7 +114,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	kv.debug("Leader %d receives PutAppend request %v\n", kv.me, *args)
-	if _, ok := kv.executed[args.CommandID]; ok {
+	clientID, commandNumber := parseCommandID(args.CommandID)
+	if commandNumber <= kv.executed[clientID] {
 		reply.Err = ""
 		reply.WrongLeader = false
 		kv.mu.Unlock()
@@ -131,6 +148,33 @@ func (kv *KVServer) Kill() {
 	// Your code here, if desired.
 }
 
+func decodeSnapshot(snapshotData []byte) (int, int, map[string]string, map[int64]int64) {
+	kvs := make(map[string]string)
+	executed := make(map[int64]int64)
+	var lastIncludedTerm, lastIncludedIndex int
+	buf := bytes.NewBuffer(snapshotData)
+	decoder := labgob.NewDecoder(buf)
+
+	err := decoder.Decode(&lastIncludedTerm)
+	if err != nil {
+		log.Panicf("Error decoding last included term: [%v]\n", err)
+	}
+	err = decoder.Decode(&lastIncludedIndex)
+	if err != nil {
+		log.Panicf("Error decoding last included index: [%v]\n", err)
+	}
+	err = decoder.Decode(&kvs)
+	if err != nil {
+		log.Panicf("Error decoding k-v pairs: [%v]", err)
+	}
+	err = decoder.Decode(&executed)
+	if err != nil {
+		log.Panicf("Error decoding executed command IDs: [%v]", err)
+	}
+
+	return lastIncludedTerm, lastIncludedIndex, kvs, executed
+}
+
 //
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
@@ -155,7 +199,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-	kv.executed = make(map[string]struct{})
+	kv.executed = make(map[int64]int64)
 	kv.pairs = make(map[string]string)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
@@ -167,22 +211,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	snapshotBytes := kv.rf.GetSnapshot()
 
 	if len(snapshotBytes) > 0 {
-		buf := bytes.NewBuffer(snapshotBytes)
-		decoder := labgob.NewDecoder(buf)
-		err := decoder.Decode(&kv.lastCommandIndex)
+		_, lastIncludedIndex, kvs, executed := decodeSnapshot(snapshotBytes)
+		kv.lastCommandIndex = lastIncludedIndex
 		kv.snapshottedIndex = kv.lastCommandIndex
-		if err != nil {
-			log.Printf("Error decoding last included index: [%v]\n", err)
-		}
-		var lastIncludedTerm int
-		err = decoder.Decode(&lastIncludedTerm)
-		if err != nil {
-			log.Printf("Error decoding last included term: [%v]\n", err)
-		}
-		err = decoder.Decode(&kv.pairs)
-		if err != nil {
-			log.Printf("Error decoding k-v pairs: [%v]", err)
-		}
+		kv.pairs = kvs
+		kv.executed = executed
 	}
 
 	go readAppliedCommand(kv)
@@ -198,22 +231,34 @@ func readAppliedCommand(kv *KVServer) {
 		time.Sleep(10 * time.Millisecond)
 		applyMsg := <-kv.applyCh
 		if applyMsg.CommandValid {
-			op := applyMsg.Command.(Op)
+			op, ok := applyMsg.Command.(Op)
+			if !ok {
+				log.Panicf("Cannot convert command at index [%d]", applyMsg.CommandIndex)
+			}
 			kv.mu.Lock()
-			if _, ok := kv.executed[op.CommandID]; !ok {
+			clientID, commandNumber := parseCommandID(op.CommandID)
+			if commandNumber > kv.executed[clientID] {
 				switch op.Type {
 				case PutType:
 					kv.pairs[op.Key] = op.Value
 				case AppendType:
 					kv.pairs[op.Key] = kv.pairs[op.Key] + op.Value
 				}
-				kv.executed[op.CommandID] = struct{}{}
+				kv.executed[clientID] = commandNumber
 			}
 			kv.lastCommandIndex = applyMsg.CommandIndex
 			kv.mu.Unlock()
 			if ch, ok := kv.applied[applyMsg.CommandIndex]; ok {
 				ch <- op.CommandID
 			}
+		} else if len(applyMsg.SnapshotData) > 0 {
+			// Follower receives a snapshot.
+			_, lastIncludedIndex, kvs, executed := decodeSnapshot(applyMsg.SnapshotData)
+			kv.mu.Lock()
+			kv.pairs, kv.executed = kvs, executed
+			kv.lastCommandIndex = lastIncludedIndex
+			kv.snapshottedIndex = lastIncludedIndex
+			kv.mu.Unlock()
 		}
 	}
 }
@@ -223,7 +268,7 @@ func checkRaftStateSize(kv *KVServer) {
 		time.Sleep(10 * time.Millisecond)
 		kv.mu.Lock()
 		if kv.rf.GetStateSize() > kv.maxraftstate && kv.lastCommandIndex > kv.snapshottedIndex {
-			kv.rf.CreateSnapshot(kv.pairs, kv.lastCommandIndex)
+			kv.rf.CreateSnapshot(kv.pairs, kv.executed, kv.lastCommandIndex)
 			kv.snapshottedIndex = kv.lastCommandIndex
 		}
 		kv.mu.Unlock()

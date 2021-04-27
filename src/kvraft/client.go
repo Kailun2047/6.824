@@ -30,7 +30,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.clerkID = nrand()
-	ck.commandNumber = 0
+	ck.commandNumber = 1
 	ck.leaderID = -1
 	ck.enableDebug = false
 	return ck
