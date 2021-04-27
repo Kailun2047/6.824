@@ -768,9 +768,6 @@ func checkApplyEntries(rf *Raft) {
 			newCommittedIndex := rf.committedIndex
 			for i := range rf.peers {
 				// Leader can only commit logs whose term is the current term.
-				if rf.getPartialLogIndex(rf.matchIndex[i]) >= len(rf.logs.Entries) {
-					rf.debug("On Raft [%d], the real index [%d] for match index [%d] is out of bound ([%d])", i, rf.getPartialLogIndex(rf.matchIndex[i]), rf.matchIndex[i], len(rf.logs.Entries))
-				}
 				if rf.matchIndex[i] > newCommittedIndex && rf.logs.Entries[rf.getPartialLogIndex(rf.matchIndex[i])].Term == rf.term {
 					count := 0
 					for j := range rf.peers {
@@ -813,9 +810,6 @@ func applyEntries(rf *Raft) {
 			continue
 		}
 		rf.debug("Server [%d] (start index: [%d], last log index: [%d]) applying log [%d]", rf.me, rf.logs.StartIndex, rf.getLastLogIndex(), commandIndex)
-		if rf.getPartialLogIndex(commandIndex) >= len(rf.logs.Entries) {
-			rf.debug("On server [%d], real index [%d] for command [%d] is greater than max log entry [%d]", rf.me, rf.getPartialLogIndex(commandIndex), commandIndex, len(rf.logs.Entries)-1)
-		}
 		msg := ApplyMsg{
 			CommandValid: true,
 			Command:      rf.logs.Entries[rf.getPartialLogIndex(commandIndex)].Command,
