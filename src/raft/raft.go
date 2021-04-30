@@ -146,12 +146,12 @@ func (rf *Raft) encodeRaftState() []byte {
 	return buf.Bytes()
 }
 
-func (rf *Raft) encodeSnapshot(lastTerm, lastIndex int, kvs map[string]string, exxecuted map[int64]int64) []byte {
+func (rf *Raft) encodeSnapshot(lastTerm, lastIndex int, stateMachineData interface{}, exxecuted map[int64]int64) []byte {
 	buf := new(bytes.Buffer)
 	enc := labgob.NewEncoder(buf)
 	enc.Encode(lastTerm)
 	enc.Encode(lastIndex)
-	enc.Encode(kvs)
+	enc.Encode(stateMachineData)
 	enc.Encode(exxecuted)
 	return buf.Bytes()
 }
@@ -851,7 +851,7 @@ func (rf *Raft) GetSnapshot() []byte {
 
 // CreateSnapshot accepts a snapshot from kvserver, discards old log entries included in the snapshot,
 // and persists Raft state and snapshot together.
-func (rf *Raft) CreateSnapshot(kvs map[string]string, executed map[int64]int64, lastLogIndex int) {
+func (rf *Raft) CreateSnapshot(stateMachineData interface{}, executed map[int64]int64, lastLogIndex int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// Discard log entries that are included in snapshot.
@@ -859,5 +859,5 @@ func (rf *Raft) CreateSnapshot(kvs map[string]string, executed map[int64]int64, 
 	rf.logs.Entries = append([]LogEntry{}, rf.logs.Entries[rf.getPartialLogIndex(lastLogIndex+1):]...)
 	rf.logs.StartIndex = lastLogIndex + 1
 	rf.debug("Server [%d] created snapshot up until index [%d] in term [%d]; new start index: [%d], new logs: [%v]\n", rf.me, lastLogIndex, lastLogTerm, rf.logs.StartIndex, rf.logs.Entries)
-	rf.persister.SaveStateAndSnapshot(rf.encodeRaftState(), rf.encodeSnapshot(lastLogTerm, lastLogIndex, kvs, executed))
+	rf.persister.SaveStateAndSnapshot(rf.encodeRaftState(), rf.encodeSnapshot(lastLogTerm, lastLogIndex, stateMachineData, executed))
 }
