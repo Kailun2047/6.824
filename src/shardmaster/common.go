@@ -71,3 +71,17 @@ type QueryReply struct {
 	Err         Err
 	Config      Config
 }
+
+func copyGroups(groups map[int][]string) map[int][]string {
+	newGroups := make(map[int][]string)
+	for gid := range newGroups {
+		newGroups[gid] = groups[gid]
+	}
+	return newGroups
+}
+
+func copyShards(shards [NShards]int) [NShards]int {
+	var newShards [NShards]int
+	copy(newShards[:], shards[:])
+	return newShards
+}
