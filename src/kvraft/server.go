@@ -237,17 +237,15 @@ func readAppliedCommand(kv *KVServer) {
 			}
 			kv.mu.Lock()
 			clientID, commandNumber := parseCommandID(op.CommandID)
-			if commandNumber <= kv.executed[clientID] {
-				kv.mu.Unlock()
-				continue
+			if commandNumber > kv.executed[clientID] {
+				switch op.Type {
+				case PutType:
+					kv.pairs[op.Key] = op.Value
+				case AppendType:
+					kv.pairs[op.Key] = kv.pairs[op.Key] + op.Value
+				}
+				kv.executed[clientID] = commandNumber
 			}
-			switch op.Type {
-			case PutType:
-				kv.pairs[op.Key] = op.Value
-			case AppendType:
-				kv.pairs[op.Key] = kv.pairs[op.Key] + op.Value
-			}
-			kv.executed[clientID] = commandNumber
 			kv.lastCommandIndex = applyMsg.CommandIndex
 			kv.mu.Unlock()
 			if ch, ok := kv.applied[applyMsg.CommandIndex]; ok {
