@@ -39,7 +39,6 @@ type KVServer struct {
 	// Your definitions here.
 	executed         map[int64]int64 // Record largest executed command number for each client.
 	pairs            map[string]string
-	cond             *sync.Cond
 	applied          map[int]chan string
 	enableDebug      bool
 	lastCommandIndex int // Used for snapshotting.
