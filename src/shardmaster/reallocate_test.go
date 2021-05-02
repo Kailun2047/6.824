@@ -25,9 +25,9 @@ func TestTargetAllocation(t *testing.T) {
 
 	for i := 0; i < len(testInputs); i++ {
 		actualOutput := getTargetAllocation(testInputs[i].numShards, testInputs[i].numGroups)
-		assert.Equal(t, len(actualOutput), len(testOutputs[i]), "Expected length not equal to actual length")
+		assert.Equal(t, len(testOutputs[i]), len(actualOutput), "Expected length not equal to actual length")
 		for j, size := range actualOutput {
-			assert.Equal(t, size, testOutputs[i][j], "Expected group size not equal to actual size")
+			assert.Equal(t, testOutputs[i][j], size, "Expected group size not equal to actual size")
 		}
 	}
 }

@@ -1,12 +1,13 @@
 package shardmaster
 
 import (
-	"bytes"
 	"labgob"
 	"labrpc"
 	"log"
 	"math"
 	"raft"
+	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +24,8 @@ const (
 	Query = "Query"
 )
 
+var argsReflectPat = "[a-z]+\\.([a-zA-Z]+)Args"
+
 type ShardMaster struct {
 	mu      sync.Mutex
 	me      int
@@ -30,10 +33,9 @@ type ShardMaster struct {
 	applyCh chan raft.ApplyMsg
 
 	// Your data here.
-	lastCommandIndex int
-	snapshottedIndex int
-	applied          map[int]chan string // Used to notify a command has finished execution.
-	executed         map[int64]int64     // Record largest executed command number for each client.
+	applied     map[int]chan string // Used to notify a command has finished execution.
+	executed    map[int64]int64     // Record largest executed command number for each client.
+	enableDebug bool
 
 	configs []Config // indexed by config num
 }
@@ -45,26 +47,69 @@ type Op struct {
 	Args      interface{}
 }
 
+func (sm *ShardMaster) startAgreementAndWait(args interface{}, commandID string, configNum int) (err Err, wrongLeader bool, config Config) {
+	fullArgsType := reflect.TypeOf(args).String()
+	pat := regexp.MustCompile(argsReflectPat)
+	matches := pat.FindAllStringSubmatch(fullArgsType, -1)
+	if matches == nil || len(matches) > 1 {
+		log.Fatalf("Args type [%s] has wrong number of submatches on pattern [%s]", fullArgsType, argsReflectPat)
+	}
+	argsType := matches[0][1] // The first match is the whole string.
+
+	sm.mu.Lock()
+	index, _, isLeader := sm.rf.Start(Op{
+		Type:      argsType,
+		Args:      args,
+		CommandID: commandID,
+	})
+	if !isLeader {
+		wrongLeader = true
+		sm.mu.Unlock()
+		return
+	}
+	sm.debug("Leader %d receives [%s] request [%+v]\n", sm.me, argsType, args)
+
+	if _, ok := sm.applied[index]; !ok {
+		sm.applied[index] = make(chan string)
+	}
+
+	if configNum == -1 || configNum >= len(sm.configs) {
+		configNum = len(sm.configs) - 1
+	}
+	config = sm.configs[configNum]
+
+	sm.mu.Unlock()
+	actualCommandID := <-sm.applied[index]
+	if actualCommandID != commandID {
+		err = "Leadership changed before commit (new leader applied new command)"
+		wrongLeader = true
+		return
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	delete(sm.applied, index)
+	return
+}
+
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
+	reply.Err, reply.WrongLeader, _ = sm.startAgreementAndWait(*args, args.CommandID, -1)
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
+	reply.Err, reply.WrongLeader, _ = sm.startAgreementAndWait(*args, args.CommandID, -1)
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
+	reply.Err, reply.WrongLeader, _ = sm.startAgreementAndWait(*args, args.CommandID, -1)
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
-
-	configNum := args.Num
-	if configNum == -1 || configNum >= len(sm.configs) {
-		configNum = len(sm.configs) - 1
-	}
-
+	reply.Err, reply.WrongLeader, reply.Config = sm.startAgreementAndWait(*args, args.CommandID, args.Num)
 }
 
 //
@@ -81,33 +126,6 @@ func (sm *ShardMaster) Kill() {
 // needed by shardkv tester
 func (sm *ShardMaster) Raft() *raft.Raft {
 	return sm.rf
-}
-
-func decodeSnapshot(snapshotData []byte) (int, int, []Config, map[int64]int64) {
-	var configs []Config
-	executed := make(map[int64]int64)
-	var lastIncludedTerm, lastIncludedIndex int
-	buf := bytes.NewBuffer(snapshotData)
-	decoder := labgob.NewDecoder(buf)
-
-	err := decoder.Decode(&lastIncludedTerm)
-	if err != nil {
-		log.Fatalf("Error decoding last included term: [%v]\n", err)
-	}
-	err = decoder.Decode(&lastIncludedIndex)
-	if err != nil {
-		log.Fatalf("Error decoding last included index: [%v]\n", err)
-	}
-	err = decoder.Decode(&configs)
-	if err != nil {
-		log.Fatalf("Error decoding configs: [%v]", err)
-	}
-	err = decoder.Decode(&executed)
-	if err != nil {
-		log.Fatalf("Error decoding executed command IDs: [%v]", err)
-	}
-
-	return lastIncludedTerm, lastIncludedIndex, configs, executed
 }
 
 //
@@ -128,6 +146,14 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
 
 	// Your code here.
+	labgob.Register(JoinArgs{})
+	labgob.Register(LeaveArgs{})
+	labgob.Register(MoveArgs{})
+	labgob.Register(QueryArgs{})
+	sm.executed = make(map[int64]int64)
+	sm.applied = make(map[int]chan string)
+	sm.enableDebug = false
+	go sm.readAppliedCommand()
 
 	return sm
 }
@@ -171,21 +197,17 @@ func reallocateShards(newConfig *Config, newGroups []int, removedGroups []int) {
 	})
 
 	if newGroups != nil {
-		if len(groupsToShards) == 0 {
-			if len(newGroups) != 1 {
-				log.Fatalf("Expecting only 1 new group but got [%d]", len(newGroups))
-			}
-			for i := range newConfig.Shards {
-				newConfig.Shards[i] = newGroups[0]
-			}
-			return
-		}
-
 		targetAllocation := getTargetAllocation(len(newConfig.Shards), len(newConfig.Groups))
 		// Transform current shard allocation to target allocation.
-		for i, gid := range sortedGroups {
-			for j := 0; j < len(groupsToShards[gid])-targetAllocation[i]; j++ {
-				shardsToReallocate = append(shardsToReallocate, groupsToShards[gid][j])
+		if len(groupsToShards) == 0 {
+			for i := 0; i < len(newConfig.Shards); i++ {
+				shardsToReallocate = append(shardsToReallocate, i)
+			}
+		} else {
+			for i, gid := range sortedGroups {
+				for j := 0; j < len(groupsToShards[gid])-targetAllocation[i]; j++ {
+					shardsToReallocate = append(shardsToReallocate, groupsToShards[gid][j])
+				}
 			}
 		}
 		curIdx := 0
@@ -280,12 +302,11 @@ func (sm *ShardMaster) moveShards(moveArgs *MoveArgs) {
 	sm.configs = append(sm.configs, newConfig)
 }
 
-func readAppliedCommand(sm *ShardMaster) {
+func (sm *ShardMaster) readAppliedCommand() {
 	for {
 		time.Sleep(10 * time.Millisecond)
 		applyMsg := <-sm.applyCh
 		if applyMsg.CommandValid {
-			// TODO: check request type and execute the request.
 			op, ok := applyMsg.Command.(Op)
 			if !ok {
 				log.Fatalf("Invalid command type")
@@ -293,37 +314,32 @@ func readAppliedCommand(sm *ShardMaster) {
 
 			sm.mu.Lock()
 			clientID, commandNumber := parseCommandID(op.CommandID)
-			if commandNumber <= sm.executed[clientID] {
-				sm.mu.Unlock()
-				continue
+			if commandNumber > sm.executed[clientID] {
+				switch op.Type {
+				case Join:
+					joinArgs, _ := op.Args.(JoinArgs)
+					sm.reconfigure(&joinArgs, nil)
+				case Leave:
+					leaveArgs, _ := op.Args.(LeaveArgs)
+					sm.reconfigure(nil, &leaveArgs)
+				case Move:
+					moveArgs, _ := op.Args.(MoveArgs)
+					sm.moveShards(&moveArgs)
+				}
+				sm.executed[clientID] = commandNumber
 			}
-			switch op.Type {
-			case Join:
-				joinArgs, _ := op.Args.(*JoinArgs)
-				sm.reconfigure(joinArgs, nil)
-			case Leave:
-				leaveArgs, _ := op.Args.(*LeaveArgs)
-				sm.reconfigure(nil, leaveArgs)
-			case Move:
-				moveArgs, _ := op.Args.(*MoveArgs)
-				sm.moveShards(moveArgs)
-			}
-
-			sm.lastCommandIndex = applyMsg.CommandIndex
 			sm.mu.Unlock()
-			ch, ok := sm.applied[applyMsg.CommandIndex]
-			if !ok {
-				log.Fatalf("Channel for command index [%d] doesn't exist", applyMsg.CommandIndex)
+			if ch, ok := sm.applied[applyMsg.CommandIndex]; ok {
+				ch <- op.CommandID
 			}
-			ch <- op.CommandID
-		} else if len(applyMsg.SnapshotData) > 0 {
-			// Follower receives a snapshot.
-			_, lastIncludedIndex, configs, executed := decodeSnapshot(applyMsg.SnapshotData)
-			sm.mu.Lock()
-			sm.configs, sm.executed = configs, executed
-			sm.lastCommandIndex = lastIncludedIndex
-			sm.snapshottedIndex = lastIncludedIndex
-			sm.mu.Unlock()
+		} else {
+			log.Fatalf("Unexpected snapshot on shard master")
 		}
+	}
+}
+
+func (sm *ShardMaster) debug(s string, a ...interface{}) {
+	if sm.enableDebug {
+		log.Printf(s, a...)
 	}
 }

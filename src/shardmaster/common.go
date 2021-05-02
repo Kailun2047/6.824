@@ -35,7 +35,8 @@ const (
 type Err string
 
 type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+	Servers   map[int][]string // new GID -> servers mappings
+	CommandID string
 }
 
 type JoinReply struct {
@@ -44,7 +45,8 @@ type JoinReply struct {
 }
 
 type LeaveArgs struct {
-	GIDs []int
+	GIDs      []int
+	CommandID string
 }
 
 type LeaveReply struct {
@@ -53,8 +55,9 @@ type LeaveReply struct {
 }
 
 type MoveArgs struct {
-	Shard int
-	GID   int
+	Shard     int
+	GID       int
+	CommandID string
 }
 
 type MoveReply struct {
@@ -63,7 +66,8 @@ type MoveReply struct {
 }
 
 type QueryArgs struct {
-	Num int // desired config number
+	Num       int // desired config number
+	CommandID string
 }
 
 type QueryReply struct {
@@ -74,7 +78,7 @@ type QueryReply struct {
 
 func copyGroups(groups map[int][]string) map[int][]string {
 	newGroups := make(map[int][]string)
-	for gid := range newGroups {
+	for gid := range groups {
 		newGroups[gid] = groups[gid]
 	}
 	return newGroups
