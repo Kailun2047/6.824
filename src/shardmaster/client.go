@@ -4,14 +4,21 @@ package shardmaster
 // Shardmaster clerk.
 //
 
-import "labrpc"
-import "time"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"labrpc"
+	"log"
+	"math/big"
+	"strconv"
+	"time"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	clerkID       int64
+	commandNumber int // Serial number for current command.
+	enableDebug   bool
 }
 
 func nrand() int64 {
@@ -25,13 +32,24 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.clerkID = nrand()
+	ck.commandNumber = 1
+
 	return ck
+}
+
+func (ck *Clerk) generateCommandID() string {
+	commandID := strconv.FormatInt(ck.clerkID, 10) + "+" + strconv.Itoa(ck.commandNumber)
+	ck.commandNumber++
+	return commandID
 }
 
 func (ck *Clerk) Query(num int) Config {
 	args := &QueryArgs{}
 	// Your code here.
 	args.Num = num
+	args.CommandID = ck.generateCommandID()
+
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -49,6 +67,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 	args := &JoinArgs{}
 	// Your code here.
 	args.Servers = servers
+	args.CommandID = ck.generateCommandID()
 
 	for {
 		// try each known server.
@@ -67,6 +86,7 @@ func (ck *Clerk) Leave(gids []int) {
 	args := &LeaveArgs{}
 	// Your code here.
 	args.GIDs = gids
+	args.CommandID = ck.generateCommandID()
 
 	for {
 		// try each known server.
@@ -86,6 +106,7 @@ func (ck *Clerk) Move(shard int, gid int) {
 	// Your code here.
 	args.Shard = shard
 	args.GID = gid
+	args.CommandID = ck.generateCommandID()
 
 	for {
 		// try each known server.
@@ -97,5 +118,11 @@ func (ck *Clerk) Move(shard int, gid int) {
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (ck *Clerk) debug(s string, a ...interface{}) {
+	if ck.enableDebug {
+		log.Printf(s, a...)
 	}
 }
